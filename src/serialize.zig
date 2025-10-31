@@ -337,7 +337,11 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
             try w.writeInt(Int, @bitCast(value.*), output_endian);
         },
         .int => |info| {
-            const bits = @sizeOf(T) * 8;
+            // TODO: think about the c integers
+
+            // {u,i}size does not have a defined layout, so we default to 64 bit
+            // to ensure compatibility between 32 and 64 bit systems
+            const bits = if (T == usize or T == isize) 64 else @sizeOf(T) * 8;
             const Int = @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } });
 
             try w.writeInt(Int, value.*, output_endian);
@@ -428,8 +432,9 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         },
 
         .int => |info| {
-            // bit size for a byte aligned number
-            const bits = @sizeOf(T) * 8;
+            // {u,i}size does not have a defined layout, so we default to 64 bit
+            // to ensure compatibility between 32 and 64 bit systems
+            const bits = if (T == usize or T == isize) 64 else @sizeOf(T) * 8;
             const Int = @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } });
 
             const int = try r.takeInt(Int, output_endian);
