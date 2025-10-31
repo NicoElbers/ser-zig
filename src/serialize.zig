@@ -350,8 +350,13 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         .pointer => |info| switch (info.size) {
             .slice => {
                 try w.writeInt(u32, @intCast(value.len), output_endian);
-                for (value.*) |*elem| {
-                    try serialize(info.child, elem, w);
+
+                if (info.child == u8) {
+                    try w.writeAll(value.*);
+                } else {
+                    for (value.*) |*elem| {
+                        try serialize(info.child, elem, w);
+                    }
                 }
             },
             .one => try serialize(info.child, value.*, w),
@@ -367,8 +372,12 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
             }
         },
         .array => |info| {
-            for (value) |*elem| {
-                try serialize(info.child, elem, w);
+            if (info.child == u8) {
+                try w.writeAll(value);
+            } else {
+                for (value) |*elem| {
+                    try serialize(info.child, elem, w);
+                }
             }
         },
 
@@ -459,9 +468,20 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
                 );
                 errdefer gpa.free(slice);
 
-                for (slice) |*elem| {
-                    elem.* = try deserialize(info.child, gpa, r);
+                if (info.child == u8) {
+                    var fw: Writer = .fixed(slice);
+                    r.streamExact(&fw, length) catch |err| switch (err) {
+                        error.ReadFailed => return error.ReadFailed,
+                        error.EndOfStream => return error.EndOfStream,
+                        error.WriteFailed => unreachable,
+                    };
+                    assert(fw.end == length);
+                } else {
+                    for (slice) |*elem| {
+                        elem.* = try deserialize(info.child, gpa, r);
+                    }
                 }
+
                 return slice;
             },
             .one => {
@@ -488,8 +508,18 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .array => |info| {
             var arr: T = undefined;
 
-            for (&arr) |*elem| {
-                elem.* = try deserialize(info.child, gpa, r);
+            if (info.child == u8) {
+                var fw: Writer = .fixed(&arr);
+                r.streamExact(&fw, info.len) catch |err| switch (err) {
+                    error.ReadFailed => return error.ReadFailed,
+                    error.EndOfStream => return error.EndOfStream,
+                    error.WriteFailed => unreachable,
+                };
+                assert(fw.end == info.len);
+            } else {
+                for (&arr) |*elem| {
+                    elem.* = try deserialize(info.child, gpa, r);
+                }
             }
 
             return arr;
@@ -600,12 +630,14 @@ test serialize {
 
     try tst([]const u32, &a, &.{ r.int(u32), r.int(u32), r.int(u32) });
     try tst([]const u32, &a, &.{});
+    try tst([]const u8, &a, &.{ r.int(u8), r.int(u8), r.int(u8) });
 
     try tst([:0]const u8, &a, "Hello");
 
     try tst(*const [3]u32, &a, &.{ r.int(u32), r.int(u32), r.int(u32) });
     try tst([3]u32, &a, .{ r.int(u32), r.int(u32), r.int(u32) });
     try tst([0]u32, &a, .{});
+    try tst([3]u8, &a, .{ r.int(u8), r.int(u8), r.int(u8) });
 
     try tst(@Vector(3, u32), &a, .{ r.int(u32), r.int(u32), r.int(u32) });
     try tst(@Vector(0, u32), &a, .{});
