@@ -570,6 +570,8 @@ test serialize {
     try tst(u32, &a, r.int(u32));
     try tst(u5, &a, r.int(u5));
     try tst(u0, &a, r.int(u0));
+    try tst(u128, &a, r.int(u128));
+    try tst(u256, &a, r.int(u256));
 
     try tst(i32, &a, r.intRangeLessThan(i32, std.math.minInt(i32), 0));
     try tst(i5, &a, r.intRangeLessThan(i5, std.math.minInt(i5), 0));
@@ -587,6 +589,9 @@ test serialize {
     try tst(void, &a, {});
 
     try tst(enum(u32) { foo }, &a, .foo);
+    try tst(enum { foo }, &a, .foo);
+    try tst(enum(u2) { foo }, &a, .foo);
+    try tst(enum { foo, bar }, &a, .foo);
 
     try tst([]const u32, &a, &.{ r.int(u32), r.int(u32), r.int(u32) });
     try tst([]const u32, &a, &.{});
