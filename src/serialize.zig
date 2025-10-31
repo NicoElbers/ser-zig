@@ -373,7 +373,7 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         },
 
         .@"struct" => |info| switch (info.layout) {
-            .@"packed" => try w.writeInt(info.backing_integer.?, @bitCast(value.*), output_endian),
+            .@"packed" => try serialize(info.backing_integer.?, &@bitCast(value.*), w),
 
             .auto,
             .@"extern",
@@ -497,7 +497,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
 
         .@"struct" => |info| switch (info.layout) {
             .@"packed" => {
-                const backing = try r.takeInt(info.backing_integer.?, output_endian);
+                const backing = try deserialize(info.backing_integer.?, .failing, r);
                 return @as(T, @bitCast(backing));
             },
 
@@ -624,6 +624,7 @@ test serialize {
     try tst(struct { foo: [1]u32 }, &a, .{ .foo = .{r.int(u32)} });
 
     try tst(packed struct { foo: u32 }, &a, .{ .foo = r.int(u32) });
+    try tst(packed struct(u5) { foo: u5 }, &a, .{ .foo = r.int(u5) });
 
     try tst(struct { u32 }, &a, .{r.int(u32)});
     try tst(struct { [1]u32 }, &a, .{.{r.int(u32)}});
