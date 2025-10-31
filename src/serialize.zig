@@ -330,7 +330,7 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
 
         .bool => try w.writeByte(@intFromBool(value.*)),
 
-        .@"enum" => |info| try w.writeInt(info.tag_type, @intFromEnum(value.*), output_endian),
+        .@"enum" => |info| try serialize(info.tag_type, &@intFromEnum(value.*), w),
 
         .float => |info| {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
@@ -422,10 +422,9 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
             else => error.Corrupt,
         },
 
-        .@"enum" => r.takeEnum(T, output_endian) catch |err| switch (err) {
-            error.ReadFailed => error.ReadFailed,
-            error.EndOfStream => error.EndOfStream,
-            error.InvalidEnumTag => error.Corrupt,
+        .@"enum" => |info| {
+            const int = try deserialize(info.tag_type, .failing, r);
+            return std.enums.fromInt(T, int) orelse return error.Corrupt;
         },
 
         .int => |info| {
