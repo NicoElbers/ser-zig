@@ -352,7 +352,7 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
 
         .pointer => |info| switch (info.size) {
             .slice => {
-                try w.writeInt(u32, @intCast(value.len), output_endian);
+                try serializeLength(value.len, w);
 
                 if (info.child == u8) {
                     try w.writeAll(value.*);
@@ -473,7 +473,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
 
         .pointer => |info| switch (info.size) {
             .slice => {
-                const length = try r.takeInt(u32, output_endian);
+                const length = try deserializeLength(r);
 
                 const slice = try gpa.allocWithOptions(
                     info.child,
@@ -743,6 +743,126 @@ test serialize {
     try tst(union(enum(u32)) { foo: u32, bar: u32 }, &a, .{ .foo = r.int(u32) });
 }
 
+
+/// Optimized for small lengths.
+/// We do a fairly simple approach where we:
+/// 1) take a byte
+/// 2) if the byte from (1) did not have the top bit set, that's
+///    the length.
+/// 3) if the byte from (1) is 0b1000_0000, take the next 2
+///    bytes (u16) as length.
+/// 4) if the byte from (1) is 0b1100_0000, take the next 8
+///    bytes (u64) as length.
+///
+/// The thinking here is that:
+/// * For very short slices you don't want to waste any bytes on
+///   the length.
+/// * On slices of 128 elements those 8 bytes might be something
+///   but 3 bytes is only 'wasting' 1 byte, which is fine for
+///   simplicity purposes.
+/// * After 65535 elements, we just use all 8 bytes, it doesn't
+///   matter anymore.
+pub fn serializeLength(length: usize, w: *Writer) SerializationError!void {
+    switch (@as(u64, length)) {
+        0...maxInt(u7) => {
+            const len: u7 = @intCast(length);
+            try serialize(u7, &len, w);
+        },
+        maxInt(u7) + 1...maxInt(u16) => {
+            const byte_len: u8 = 0b1000_0000;
+            try serialize(u8, &byte_len, w);
+
+            const len: u16 = @intCast(length);
+            try serialize(u16, &len, w);
+        },
+        maxInt(u16) + 1...maxInt(u64) => {
+            const byte_len: u8 = 0b1100_0000;
+            try serialize(u8, &byte_len, w);
+
+            const len: u64 = @intCast(length);
+            try serialize(u64, &len, w);
+        },
+    }
+}
+
+/// Optimized for small lengths.
+/// We do a fairly simple approach where we:
+/// 1) take a byte
+/// 2) if the byte from (1) did not have the top bit set, that's
+///    the length.
+/// 3) if the byte from (1) is 0b1000_0000, take the next 2
+///    bytes (u16) as length.
+/// 4) if the byte from (1) is 0b1100_0000, take the next 8
+///    bytes (u64) as length.
+///
+/// The thinking here is that:
+/// * For very short slices you don't want to waste any bytes on
+///   the length.
+/// * On slices of 128 elements those 8 bytes might be something
+///   but 3 bytes is only 'wasting' 1 byte, which is fine for
+///   simplicity purposes.
+/// * After 65535 elements, we just use all 8 bytes, it doesn't
+///   matter anymore.
+pub fn deserializeLength(r: *Reader) DeserializationError!usize {
+    const length_64: u64 = switch (try deserialize(u8, .failing, r)) {
+        0...maxInt(u7) => |len| len,
+        0b1000_0000 => try deserialize(u16, .failing, r),
+        0b1100_0000 => try deserialize(u64, .failing, r),
+        else => return error.Corrupt,
+    };
+
+    // If we cannot load the amount of elements, the file might as well be
+    // corrupt
+    return std.math.cast(usize, length_64) orelse
+        return error.Corrupt;
+}
+
+test "serializing length" {
+    const Arena = std.heap.ArenaAllocator;
+
+    const tst = struct {
+        pub fn tst(
+            arena: *Arena,
+            len: usize,
+            expected_bytes: usize,
+        ) !void {
+            _ = arena.reset(.retain_capacity);
+
+            var aw: Writer.Allocating = .init(arena.allocator());
+            defer aw.deinit();
+
+            try serializeLength(len, &aw.writer);
+
+            try std.testing.expectEqual(expected_bytes, aw.written().len);
+
+            var fr: Reader = .fixed(aw.written());
+
+            const copy = try deserializeLength(&fr);
+
+            try std.testing.expectEqual(aw.written().len, fr.end);
+            try std.testing.expectEqual(len, copy);
+        }
+    }.tst;
+
+    var a: Arena = .init(std.testing.allocator);
+    defer a.deinit();
+
+    for (0..maxInt(u7)) |len| {
+        try tst(&a, len, 1);
+    }
+    try tst(&a, 0b0111_1111, 1);
+    try tst(&a, 0b1000_0000, 3);
+
+    try tst(&a, maxInt(u16), 3);
+    try tst(&a, maxInt(u16) + 1, 9);
+    try tst(&a, maxInt(u32), 9);
+
+    if (@bitSizeOf(usize) >= 64) {
+        try tst(&a, maxInt(u32) + 1, 9);
+        try tst(&a, maxInt(u64), 9);
+    }
+}
+
 /// Serialize a MultiArrayList in the following format:
 /// All numbers in little endian
 /// * length: u32
@@ -757,12 +877,10 @@ pub fn serializeMultiArrayList(
     const MT = MultiArrayList(T);
     const Field = MT.Field;
 
-    const length: u32 = @intCast(mal.len);
-
-    try w.writeInt(u32, length, output_endian);
+    try serializeLength(mal.len, w);
     inline for (sortStructFields(T)) |field| {
         const items = mal.items(std.meta.stringToEnum(Field, field.name).?);
-        assert(items.len == length);
+        assert(items.len == mal.len);
 
         for (items) |*item| {
             try serialize(@TypeOf(item.*), item, w);
@@ -784,21 +902,22 @@ pub fn deserializeMultiArrayList(
     const MT = MultiArrayList(T);
     const Field = MT.Field;
 
-    const length = try r.takeInt(u32, output_endian);
+    const len = try deserializeLength(r);
 
-    const byte_length = MT.capacityInBytes(length);
+    const byte_length = MT.capacityInBytes(len);
     const bytes = try gpa.alignedAlloc(u8, .of(T), byte_length);
     errdefer gpa.free(bytes);
 
     var mal: MultiArrayList(T) = .{
         .bytes = bytes.ptr,
-        .len = length,
-        .capacity = length,
+        .len = len,
+        .capacity = len,
     };
 
     inline for (sortStructFields(T)) |field| {
         const items = mal.items(std.meta.stringToEnum(Field, field.name).?);
-        assert(items.len == length);
+        assert(items.len == len);
+
         for (items) |*item| {
             item.* = try deserialize(@TypeOf(item.*), gpa, r);
         }
@@ -1064,6 +1183,7 @@ fn sortStructFields(comptime T: type) [@typeInfo(T).@"struct".fields.len]StructF
 
 const std = @import("std");
 
+const maxInt = std.math.maxInt;
 const assert = std.debug.assert;
 
 const Io = std.Io;
