@@ -341,8 +341,10 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
 
             // {u,i}size does not have a defined layout, so we default to 64 bit
             // to ensure compatibility between 32 and 64 bit systems
-            const bits = if (T == usize or T == isize) 64 else @sizeOf(T) * 8;
-            const Int = @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } });
+            const bits = if (T == usize or T == isize) 64 else @bitSizeOf(T);
+            const Int = std.math.ByteAlignedInt(
+                @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } }),
+            );
 
             try w.writeInt(Int, value.*, output_endian);
         },
@@ -442,8 +444,10 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .int => |info| {
             // {u,i}size does not have a defined layout, so we default to 64 bit
             // to ensure compatibility between 32 and 64 bit systems
-            const bits = if (T == usize or T == isize) 64 else @sizeOf(T) * 8;
-            const Int = @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } });
+            const bits = if (T == usize or T == isize) 64 else @bitSizeOf(T);
+            const Int = std.math.ByteAlignedInt(
+                @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } }),
+            );
 
             const int = try r.takeInt(Int, output_endian);
             return std.math.cast(T, int) orelse return error.Corrupt;
@@ -603,6 +607,7 @@ test serialize {
 
     try tst(u32, &a, r.int(u32));
     try tst(u5, &a, r.int(u5));
+    try tst(u18, &a, r.int(u18));
     try tst(u0, &a, r.int(u0));
     try tst(u128, &a, r.int(u128));
     try tst(u256, &a, r.int(u256));
@@ -612,11 +617,57 @@ test serialize {
     try tst(i0, &a, 0);
     try tst(i1, &a, -1);
 
+    try tst(usize, &a, r.int(usize));
+    try tst(isize, &a, r.int(isize));
+
     try tst(f16, &a, 0x3d5b4405bc4fb61e.0); // r.float is cringe
     try tst(f32, &a, r.float(f32));
     try tst(f64, &a, r.float(f64));
     try tst(f80, &a, 0x25754d443887f65e.0); // r.float is cringe
     try tst(f128, &a, 0x67e5a4ab744ea376.0); // r.float is cringe
+
+    inline for (.{ f16, f32, f64, f80, f128 }) |T| {
+        try tst(T, &a, std.math.inf(T));
+        try tst(T, &a, -std.math.inf(T));
+
+        const nantst = struct {
+            pub fn nantst(arena: *Arena, val: T) !void {
+                _ = arena.reset(.retain_capacity);
+                var aw: Writer.Allocating = .init(arena.allocator());
+                defer aw.deinit();
+
+                try serialize(T, &val, &aw.writer);
+
+                var fr: Reader = .fixed(aw.written());
+                const copy = try deserialize(T, arena.allocator(), &fr);
+
+                try std.testing.expectEqual(aw.written().len, fr.end);
+
+                // asBytes will use the ABI size, which for f80 is more
+                // than the functional size. For some reason in those last
+                // few bytes the original (`val`) has some garbage
+                const byte_len = @divExact(@bitSizeOf(T), 8);
+
+                // We can't do equality because NaN != Nan
+                try std.testing.expectEqualSlices(
+                    u8,
+                    std.mem.asBytes(&val)[0..byte_len],
+                    std.mem.asBytes(&copy)[0..byte_len],
+                );
+
+                var aw2: Writer.Allocating = .init(arena.allocator());
+                defer aw2.deinit();
+
+                try serialize(T, &copy, &aw2.writer);
+
+                // Serialization idempotency
+                try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
+            }
+        }.nantst;
+
+        try nantst(&a, std.math.nan(T));
+        try nantst(&a, std.math.snan(T));
+    }
 
     try tst(bool, &a, true);
     try tst(bool, &a, false);
