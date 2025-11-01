@@ -4,9 +4,39 @@ pub const DeserializationError = Reader.Error || Allocator.Error || error{Corrup
 pub const output_endian: std.builtin.Endian = .little;
 
 pub fn typeHashed(comptime T: type) u64 {
-    var wh: Wyhash = .init(0);
-    typeHash(T, &wh);
-    return wh.final();
+    const global = struct {
+        comptime {
+            _ = &T;
+        }
+        pub var mutex: std.Thread.Mutex = .{};
+        pub var hash: u64 = 0;
+    };
+
+    const load = @atomicLoad(u64, &global.hash, .acquire);
+    if (load != 0) {
+        @branchHint(.likely);
+        return load;
+    }
+
+    {
+        global.mutex.lock();
+        defer global.mutex.unlock();
+
+        if (global.hash != 0) {
+            return global.hash;
+        }
+
+        var wh: Wyhash = .init(0);
+        typeHash(T, &wh);
+        global.hash = wh.final();
+        assert(global.hash != 0); // very very unlikely
+    }
+
+    return global.hash;
+}
+
+test typeHashed {
+    try std.testing.expect(typeHashed(void) != typeHashed(u8));
 }
 
 pub fn typeHash(comptime T: type, h: *Wyhash) void {
