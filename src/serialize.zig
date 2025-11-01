@@ -105,7 +105,7 @@ pub fn typeHash(comptime T: type, h: *Wyhash) void {
             update(h, info.layout);
             typeHash(info.tag_type.?, h);
 
-            // NOTE: it's not fine to allow adding union variats because:
+            // NOTE: it's not fine to allow adding union variants because:
             // 1) A new variant might be bigger requiring more space to
             //    serialize
             // 2) There is no way to sort the fields such that an arbitrary
@@ -249,7 +249,7 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         },
 
         .vector => |info| {
-            if (@bitSizeOf(info.child) == 0) {
+            if (@sizeOf(info.child) == 0) {
                 // No need to serialize items of 0 ABI size
 
                 return;
@@ -398,7 +398,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .vector => |info| {
             var vec: T = undefined;
 
-            if (@bitSizeOf(info.child) == 0) {
+            if (@sizeOf(info.child) == 0) {
                 // No need to deserialize items of 0 ABI size
                 return vec;
             }
@@ -852,7 +852,7 @@ test "serializing length" {
     try tst(&a, maxInt(u16) + 1, 9);
     try tst(&a, maxInt(u32), 9);
 
-    if (@bitSizeOf(usize) >= 64) {
+    if (@sizeOf(usize) >= 64) {
         try tst(&a, maxInt(u32) + 1, 9);
         try tst(&a, maxInt(u64), 9);
     }
