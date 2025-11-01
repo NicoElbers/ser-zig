@@ -328,13 +328,13 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         .void,
         => {}, // zst
 
-        .bool => try serialize(u1, &@intFromBool(value.*), w),
+        .bool => try serialize(u1, @ptrCast(value), w),
 
         .@"enum" => |info| try serialize(info.tag_type, &@intFromEnum(value.*), w),
 
         .float => |info| {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
-            try serialize(Int, &@bitCast(value.*), w);
+            try serialize(Int, @ptrCast(value), w);
         },
         .int => |info| {
             // TODO: think about the c integers
