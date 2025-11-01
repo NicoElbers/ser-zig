@@ -336,15 +336,16 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
             try serialize(Int, @ptrCast(value), w);
         },
-        .int => |info| {
+        .int => {
             // TODO: think about the c integers
 
             // {u,i}size does not have a defined layout, so we default to 64 bit
             // to ensure compatibility between 32 and 64 bit systems
-            const bits = if (T == usize or T == isize) 64 else @bitSizeOf(T);
-            const Int = std.math.ByteAlignedInt(
-                @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } }),
-            );
+            const Int = switch (T) {
+                usize => u64,
+                isize => i64,
+                else => std.math.ByteAlignedInt(T),
+            };
 
             try w.writeInt(Int, value.*, output_endian);
         },
