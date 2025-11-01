@@ -328,13 +328,13 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         .void,
         => {}, // zst
 
-        .bool => try w.writeByte(@intFromBool(value.*)),
+        .bool => try serialize(u1, &@intFromBool(value.*), w),
 
         .@"enum" => |info| try serialize(info.tag_type, &@intFromEnum(value.*), w),
 
         .float => |info| {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
-            try w.writeInt(Int, @bitCast(value.*), output_endian);
+            try serialize(Int, &@bitCast(value.*), w);
         },
         .int => |info| {
             // TODO: think about the c integers
@@ -429,10 +429,9 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .void,
         => {}, // zst
 
-        .bool => switch (try r.takeByte()) {
+        .bool => switch (try deserialize(u1, .failing, r)) {
             0 => false,
             1 => true,
-            else => error.Corrupt,
         },
 
         .@"enum" => |info| {
@@ -452,7 +451,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
 
         .float => |info| blk: {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
-            const int = try r.takeInt(Int, output_endian);
+            const int = try deserialize(Int, .failing, r);
             break :blk @as(T, @bitCast(int));
         },
 
