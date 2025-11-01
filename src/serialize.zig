@@ -3,197 +3,6 @@ pub const DeserializationError = Reader.Error || Allocator.Error || error{Corrup
 
 pub const output_endian: std.builtin.Endian = .little;
 
-fn hasNoAllocLayout(comptime T: type) bool {
-    if (!hasSerializableLayout(T)) return false;
-
-    return switch (@typeInfo(T)) {
-        .type,
-        .comptime_float,
-        .comptime_int,
-        .enum_literal,
-        .undefined,
-        .noreturn,
-        .@"anyframe",
-        .@"fn",
-        .@"opaque",
-        .frame,
-        .null,
-        .error_union,
-        .error_set,
-        => comptime unreachable,
-
-        .@"enum",
-        .void,
-        .bool,
-        .int,
-        .float,
-        => true, // trivial
-
-        .pointer => false,
-
-        inline .vector,
-        .array,
-        => |info| hasNoAllocLayout(info.child),
-
-        .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                if (!hasNoAllocLayout(field.type))
-                    return false;
-            }
-            return true;
-        },
-
-        .optional => |info| hasNoAllocLayout(info.child),
-
-        .@"union" => |info| {
-            inline for (info.fields) |field| {
-                if (!hasNoAllocLayout(field.type))
-                    return false;
-            }
-            return true;
-        },
-    };
-}
-
-test hasNoAllocLayout {
-    try std.testing.expect(hasNoAllocLayout(u8));
-    try std.testing.expect(hasNoAllocLayout(?u8));
-    try std.testing.expect(hasNoAllocLayout([10]u8));
-    try std.testing.expect(hasNoAllocLayout(@Vector(10, u8)));
-    try std.testing.expect(hasNoAllocLayout(struct { foo: u8, bar: u8 }));
-    try std.testing.expect(hasNoAllocLayout(union(enum) { foo: u8, bar: u8 }));
-
-    try std.testing.expect(!hasNoAllocLayout([]u8));
-    try std.testing.expect(!hasNoAllocLayout(?[]u8));
-    try std.testing.expect(!hasNoAllocLayout([10][]u8));
-    try std.testing.expect(!hasNoAllocLayout(*[10]u8));
-    try std.testing.expect(!hasNoAllocLayout(struct { foo: u8, baz: []u8, bar: u8 }));
-    try std.testing.expect(!hasNoAllocLayout(union(enum) { foo: u8, baz: []u8, bar: u8 }));
-}
-
-fn hasSerializableLayout(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .type,
-        .comptime_float,
-        .comptime_int,
-        .enum_literal,
-        => false, // comptime only
-
-        .undefined,
-        .noreturn,
-        .@"anyframe",
-        => false, // not instanciable
-
-        .@"fn",
-        .@"opaque",
-        .frame,
-        .null,
-        => false, // undefined size
-
-        .error_union,
-        .error_set,
-        => false, // compilation unit dependent
-
-        .@"enum",
-        .void,
-        .bool,
-        .int,
-        .float,
-        => true, // trivial
-
-        .pointer => |info| switch (info.size) {
-            .slice => hasSerializableLayout(info.child),
-            .one => switch (@typeInfo(info.child)) {
-                .array => hasSerializableLayout(info.child),
-                else => false, // pointer bad
-            },
-
-            .many,
-            .c,
-            => false, // undefined size
-        },
-
-        inline .vector,
-        .array,
-        => |info| hasSerializableLayout(info.child),
-
-        .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                if (field.is_comptime or
-                    !hasSerializableLayout(field.type))
-                    return false;
-            }
-            return true;
-        },
-
-        .optional => |info| hasSerializableLayout(info.child),
-
-        .@"union" => |info| switch (info.layout) {
-            .@"extern", .@"packed" => false,
-            .auto => {
-                if (info.tag_type == null) return false; // undeserializable
-                inline for (info.fields) |field| {
-                    if (!hasSerializableLayout(field.type))
-                        return false;
-                }
-                return true;
-            },
-        },
-    };
-}
-
-test hasSerializableLayout {
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(type)));
-    try std.testing.expect(!hasSerializableLayout(comptime_int));
-    try std.testing.expect(!hasSerializableLayout(comptime_float));
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(.enum_literal)));
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(undefined)));
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(anyopaque)));
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(&hasSerializableLayout)));
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(null)));
-    try std.testing.expect(!hasSerializableLayout(@TypeOf(error.Test)));
-    try std.testing.expect(!hasSerializableLayout(error{Test}));
-
-    try std.testing.expect(hasSerializableLayout(enum(u32) { a }));
-    try std.testing.expect(hasSerializableLayout(enum(u32) { a, b, c, d }));
-    try std.testing.expect(hasSerializableLayout(void));
-    try std.testing.expect(hasSerializableLayout(bool));
-    try std.testing.expect(hasSerializableLayout(u8));
-    try std.testing.expect(hasSerializableLayout(u0));
-    try std.testing.expect(hasSerializableLayout(f32));
-
-    try std.testing.expect(hasSerializableLayout([10]u32));
-    try std.testing.expect(hasSerializableLayout(@Vector(10, u32)));
-
-    try std.testing.expect(hasSerializableLayout([]u32));
-    try std.testing.expect(hasSerializableLayout([][]u32));
-    try std.testing.expect(hasSerializableLayout(*[10]u32));
-    try std.testing.expect(!hasSerializableLayout(*u32));
-    try std.testing.expect(!hasSerializableLayout([*]u32));
-    try std.testing.expect(!hasSerializableLayout([*c]u32));
-
-    try std.testing.expect(hasSerializableLayout(?u32));
-    try std.testing.expect(hasSerializableLayout(?[]?u32));
-    try std.testing.expect(hasSerializableLayout(??u32));
-
-    try std.testing.expect(hasSerializableLayout(packed struct { foo: u32 }));
-    try std.testing.expect(hasSerializableLayout(extern struct { foo: u32 }));
-    try std.testing.expect(hasSerializableLayout(struct { foo: u32 }));
-    try std.testing.expect(hasSerializableLayout(struct { u32 }));
-    try std.testing.expect(!hasSerializableLayout(packed struct { foo: u32, bar: *u32, baz: u32 }));
-    try std.testing.expect(!hasSerializableLayout(extern struct { foo: u32, bar: *u32, baz: u32 }));
-    try std.testing.expect(!hasSerializableLayout(struct { foo: u32, bar: *u32, baz: u32 }));
-    try std.testing.expect(!hasSerializableLayout(struct { u32, *u32, u32 }));
-
-    try std.testing.expect(hasSerializableLayout(union(enum(u32)) { foo: u32 }));
-    try std.testing.expect(hasSerializableLayout(union(enum) { foo: u32 }));
-    try std.testing.expect(hasSerializableLayout(union(enum) { foo }));
-    try std.testing.expect(!hasSerializableLayout(union(enum(u32)) { foo: u32, bar: *u32, baz: u32 }));
-    try std.testing.expect(!hasSerializableLayout(union { foo: u32 }));
-    try std.testing.expect(!hasSerializableLayout(packed union { foo: u32 }));
-    try std.testing.expect(!hasSerializableLayout(extern union { foo: u32 }));
-}
-
 pub fn typeHashed(comptime T: type) u64 {
     var wh: Wyhash = .init(0);
     typeHash(T, &wh);
@@ -664,7 +473,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
     };
 }
 
-test serialize {
+test "serialization and deserialization" {
     const Arena = std.heap.ArenaAllocator;
 
     const tst = struct {
@@ -1288,6 +1097,197 @@ test "AutoArrayHashMap serialization" {
         // serliazation idempotency
         try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
     }
+}
+
+fn hasNoAllocLayout(comptime T: type) bool {
+    if (!hasSerializableLayout(T)) return false;
+
+    return switch (@typeInfo(T)) {
+        .type,
+        .comptime_float,
+        .comptime_int,
+        .enum_literal,
+        .undefined,
+        .noreturn,
+        .@"anyframe",
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .null,
+        .error_union,
+        .error_set,
+        => comptime unreachable,
+
+        .@"enum",
+        .void,
+        .bool,
+        .int,
+        .float,
+        => true, // trivial
+
+        .pointer => false,
+
+        inline .vector,
+        .array,
+        => |info| hasNoAllocLayout(info.child),
+
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (!hasNoAllocLayout(field.type))
+                    return false;
+            }
+            return true;
+        },
+
+        .optional => |info| hasNoAllocLayout(info.child),
+
+        .@"union" => |info| {
+            inline for (info.fields) |field| {
+                if (!hasNoAllocLayout(field.type))
+                    return false;
+            }
+            return true;
+        },
+    };
+}
+
+test hasNoAllocLayout {
+    try std.testing.expect(hasNoAllocLayout(u8));
+    try std.testing.expect(hasNoAllocLayout(?u8));
+    try std.testing.expect(hasNoAllocLayout([10]u8));
+    try std.testing.expect(hasNoAllocLayout(@Vector(10, u8)));
+    try std.testing.expect(hasNoAllocLayout(struct { foo: u8, bar: u8 }));
+    try std.testing.expect(hasNoAllocLayout(union(enum) { foo: u8, bar: u8 }));
+
+    try std.testing.expect(!hasNoAllocLayout([]u8));
+    try std.testing.expect(!hasNoAllocLayout(?[]u8));
+    try std.testing.expect(!hasNoAllocLayout([10][]u8));
+    try std.testing.expect(!hasNoAllocLayout(*[10]u8));
+    try std.testing.expect(!hasNoAllocLayout(struct { foo: u8, baz: []u8, bar: u8 }));
+    try std.testing.expect(!hasNoAllocLayout(union(enum) { foo: u8, baz: []u8, bar: u8 }));
+}
+
+fn hasSerializableLayout(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .type,
+        .comptime_float,
+        .comptime_int,
+        .enum_literal,
+        => false, // comptime only
+
+        .undefined,
+        .noreturn,
+        .@"anyframe",
+        => false, // not instanciable
+
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .null,
+        => false, // undefined size
+
+        .error_union,
+        .error_set,
+        => false, // compilation unit dependent
+
+        .@"enum",
+        .void,
+        .bool,
+        .int,
+        .float,
+        => true, // trivial
+
+        .pointer => |info| switch (info.size) {
+            .slice => hasSerializableLayout(info.child),
+            .one => switch (@typeInfo(info.child)) {
+                .array => hasSerializableLayout(info.child),
+                else => false, // pointer bad
+            },
+
+            .many,
+            .c,
+            => false, // undefined size
+        },
+
+        inline .vector,
+        .array,
+        => |info| hasSerializableLayout(info.child),
+
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (field.is_comptime or
+                    !hasSerializableLayout(field.type))
+                    return false;
+            }
+            return true;
+        },
+
+        .optional => |info| hasSerializableLayout(info.child),
+
+        .@"union" => |info| switch (info.layout) {
+            .@"extern", .@"packed" => false,
+            .auto => {
+                if (info.tag_type == null) return false; // undeserializable
+                inline for (info.fields) |field| {
+                    if (!hasSerializableLayout(field.type))
+                        return false;
+                }
+                return true;
+            },
+        },
+    };
+}
+
+test hasSerializableLayout {
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(type)));
+    try std.testing.expect(!hasSerializableLayout(comptime_int));
+    try std.testing.expect(!hasSerializableLayout(comptime_float));
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(.enum_literal)));
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(undefined)));
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(anyopaque)));
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(&hasSerializableLayout)));
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(null)));
+    try std.testing.expect(!hasSerializableLayout(@TypeOf(error.Test)));
+    try std.testing.expect(!hasSerializableLayout(error{Test}));
+
+    try std.testing.expect(hasSerializableLayout(enum(u32) { a }));
+    try std.testing.expect(hasSerializableLayout(enum(u32) { a, b, c, d }));
+    try std.testing.expect(hasSerializableLayout(void));
+    try std.testing.expect(hasSerializableLayout(bool));
+    try std.testing.expect(hasSerializableLayout(u8));
+    try std.testing.expect(hasSerializableLayout(u0));
+    try std.testing.expect(hasSerializableLayout(f32));
+
+    try std.testing.expect(hasSerializableLayout([10]u32));
+    try std.testing.expect(hasSerializableLayout(@Vector(10, u32)));
+
+    try std.testing.expect(hasSerializableLayout([]u32));
+    try std.testing.expect(hasSerializableLayout([][]u32));
+    try std.testing.expect(hasSerializableLayout(*[10]u32));
+    try std.testing.expect(!hasSerializableLayout(*u32));
+    try std.testing.expect(!hasSerializableLayout([*]u32));
+    try std.testing.expect(!hasSerializableLayout([*c]u32));
+
+    try std.testing.expect(hasSerializableLayout(?u32));
+    try std.testing.expect(hasSerializableLayout(?[]?u32));
+    try std.testing.expect(hasSerializableLayout(??u32));
+
+    try std.testing.expect(hasSerializableLayout(packed struct { foo: u32 }));
+    try std.testing.expect(hasSerializableLayout(extern struct { foo: u32 }));
+    try std.testing.expect(hasSerializableLayout(struct { foo: u32 }));
+    try std.testing.expect(hasSerializableLayout(struct { u32 }));
+    try std.testing.expect(!hasSerializableLayout(packed struct { foo: u32, bar: *u32, baz: u32 }));
+    try std.testing.expect(!hasSerializableLayout(extern struct { foo: u32, bar: *u32, baz: u32 }));
+    try std.testing.expect(!hasSerializableLayout(struct { foo: u32, bar: *u32, baz: u32 }));
+    try std.testing.expect(!hasSerializableLayout(struct { u32, *u32, u32 }));
+
+    try std.testing.expect(hasSerializableLayout(union(enum(u32)) { foo: u32 }));
+    try std.testing.expect(hasSerializableLayout(union(enum) { foo: u32 }));
+    try std.testing.expect(hasSerializableLayout(union(enum) { foo }));
+    try std.testing.expect(!hasSerializableLayout(union(enum(u32)) { foo: u32, bar: *u32, baz: u32 }));
+    try std.testing.expect(!hasSerializableLayout(union { foo: u32 }));
+    try std.testing.expect(!hasSerializableLayout(packed union { foo: u32 }));
+    try std.testing.expect(!hasSerializableLayout(extern union { foo: u32 }));
 }
 
 fn sortUnionFields(comptime T: type) [@typeInfo(T).@"union".fields.len]UnionField {
