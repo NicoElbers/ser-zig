@@ -379,7 +379,8 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
             }
 
             inline for (0..info.len) |i| {
-                try serialize(info.child, &value[i], w);
+                const v = value[i]; // avoid bit pointers
+                try serialize(info.child, &v, w);
             }
         },
         .array => |info| {
@@ -716,6 +717,8 @@ test serialize {
     try tst(@Vector(3, u32), &a, .{ r.int(u32), r.int(u32), r.int(u32) });
     try tst(@Vector(0, u32), &a, .{});
     try tst(@Vector(3, u0), &a, .{ 0, 0, 0 });
+    try tst(@Vector(4, bool), &a, .{ true, false, true, false });
+    try tst(@Vector(4, u1), &a, .{ 1, 0, 1, 0 });
 
     try tst(?u32, &a, null);
     try tst(?u32, &a, r.int(u32));
