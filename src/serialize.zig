@@ -858,12 +858,6 @@ test "serializing length" {
     }
 }
 
-/// Serialize a MultiArrayList in the following format:
-/// All numbers in little endian
-/// * length: u32
-/// * per field list of items
-///
-/// NOTE: Capacity is left implicit
 pub fn serializeMultiArrayList(
     comptime T: type,
     mal: *const MultiArrayList(T),
@@ -883,12 +877,6 @@ pub fn serializeMultiArrayList(
     }
 }
 
-/// Deserialize a MultiArrayList in the following format:
-/// All numbers in little endian
-/// * length: u32
-/// * per field list of items
-///
-/// NOTE: Capacity is left implicit
 pub fn deserializeMultiArrayList(
     comptime T: type,
     gpa: Allocator,
@@ -921,14 +909,6 @@ pub fn deserializeMultiArrayList(
     return mal;
 }
 
-pub fn eqlMultiArrayList(comptime T: type, a: *const MultiArrayList(T), b: *const MultiArrayList(T)) !void {
-    try std.testing.expectEqual(a.len, b.len);
-
-    for (0..a.len) |idx| {
-        try std.testing.expectEqualDeep(a.get(idx), b.get(idx));
-    }
-}
-
 test "MultiArrayList serialization" {
     const gpa = std.testing.allocator;
 
@@ -959,12 +939,6 @@ test "MultiArrayList serialization" {
     }
 }
 
-/// Serializes an ArrayList in the following format:
-/// All values are little endian
-/// * length: u32
-/// * `@as([]const u8, @ptrCast(al.items))`
-///
-/// NOTE: the capacity is left implicit
 pub fn serializeArrayList(
     comptime T: type,
     al: *const ArrayList(T),
@@ -973,12 +947,6 @@ pub fn serializeArrayList(
     try serialize([]T, &al.items, w);
 }
 
-/// Deserializes an ArrayList in the following format:
-/// All values are little endian
-/// * length: u32
-/// * `serialize([]T)`
-///
-/// NOTE: the capacity is left implicit
 pub fn deserializeArrayList(
     comptime T: type,
     gpa: Allocator,
@@ -1022,9 +990,6 @@ test "ArrayList serialization" {
     }
 }
 
-/// Serializes an AutoHashMap(Unmanaged) in the following format:
-/// All values are little endian
-/// * `serializeMultiArrayList(T.Data, &ahm.entries)`
 pub fn serializeArrayHashMap(
     comptime T: type,
     ahm: *const T,
@@ -1035,9 +1000,6 @@ pub fn serializeArrayHashMap(
     try serializeMultiArrayList(Data, &ahm.entries, w);
 }
 
-/// Deserializes an AutoHashMap(Unmanaged) in the following format:
-/// All values are little endian
-/// * `serializeMultiArrayList(T.Data, &ahm.entries)`
 pub fn deserializeArrayHashMap(
     comptime T: type,
     gpa: Allocator,
@@ -1364,6 +1326,14 @@ fn sortStructFields(comptime T: type) [@typeInfo(T).@"struct".fields.len]StructF
                 return fields;
             },
         }
+    }
+}
+
+fn eqlMultiArrayList(comptime T: type, a: *const MultiArrayList(T), b: *const MultiArrayList(T)) !void {
+    try std.testing.expectEqual(a.len, b.len);
+
+    for (0..a.len) |idx| {
+        try std.testing.expectEqualDeep(a.get(idx), b.get(idx));
     }
 }
 

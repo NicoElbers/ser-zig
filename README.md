@@ -5,6 +5,9 @@ a select standard library types.
 
 ## Usage
 
+Don't yet, I'm still working out the quirks of the library and the format is still
+subject to change. If you really want to look at the source.
+
 ## Include it
 
 To include the library yourself run
@@ -23,7 +26,7 @@ const ser_mod = b.dependency("ser", .{
 
 ## Format
 
-TODO, just look inside `serialize.zig` :)
+Subject to change for now, just look inside `serialize.zig` :)
 
 <details>
 
