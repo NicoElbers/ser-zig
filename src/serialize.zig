@@ -356,7 +356,9 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
 
                 if (info.child == u8) {
                     try w.writeAll(value.*);
-                } else {
+                } else if (@sizeOf(info.child) != 0) {
+                    // No need to serialize items of 0 ABI size
+
                     for (value.*) |*elem| {
                         try serialize(info.child, elem, w);
                     }
@@ -370,6 +372,12 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         },
 
         .vector => |info| {
+            if (@bitSizeOf(info.child) == 0) {
+                // No need to serialize items of 0 ABI size
+
+                return;
+            }
+
             inline for (0..info.len) |i| {
                 try serialize(info.child, &value[i], w);
             }
@@ -377,7 +385,9 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         .array => |info| {
             if (info.child == u8) {
                 try w.writeAll(value);
-            } else {
+            } else if (@sizeOf(info.child) != 0) {
+                // No need to serialize items of 0 ABI size
+
                 for (value) |*elem| {
                     try serialize(info.child, elem, w);
                 }
@@ -480,7 +490,9 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
                         error.WriteFailed => unreachable,
                     };
                     assert(fw.end == length);
-                } else {
+                } else if (@sizeOf(info.child) != 0) {
+                    // No need to deserialize items of 0 ABI size
+
                     for (slice) |*elem| {
                         elem.* = try deserialize(info.child, gpa, r);
                     }
@@ -504,6 +516,11 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .vector => |info| {
             var vec: T = undefined;
 
+            if (@bitSizeOf(info.child) == 0) {
+                // No need to deserialize items of 0 ABI size
+                return vec;
+            }
+
             inline for (0..info.len) |i| {
                 vec[i] = try deserialize(info.child, gpa, r);
             }
@@ -520,7 +537,9 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
                     error.WriteFailed => unreachable,
                 };
                 assert(fw.end == info.len);
-            } else {
+            } else if (@sizeOf(info.child) != 0) {
+                // No need to deserialize items of 0 ABI size
+
                 for (&arr) |*elem| {
                     elem.* = try deserialize(info.child, gpa, r);
                 }
@@ -682,6 +701,8 @@ test serialize {
     try tst([]const u32, &a, &.{ r.int(u32), r.int(u32), r.int(u32) });
     try tst([]const u32, &a, &.{});
     try tst([]const u8, &a, &.{ r.int(u8), r.int(u8), r.int(u8) });
+    try tst([]const void, &a, &.{ {}, {}, {} });
+    try tst([]const u0, &a, &.{ 0, 0, 0 });
 
     try tst([:0]const u8, &a, "Hello");
 
@@ -689,9 +710,12 @@ test serialize {
     try tst([3]u32, &a, .{ r.int(u32), r.int(u32), r.int(u32) });
     try tst([0]u32, &a, .{});
     try tst([3]u8, &a, .{ r.int(u8), r.int(u8), r.int(u8) });
+    try tst([3]void, &a, .{ {}, {}, {} });
+    try tst([3]u0, &a, .{ 0, 0, 0 });
 
     try tst(@Vector(3, u32), &a, .{ r.int(u32), r.int(u32), r.int(u32) });
     try tst(@Vector(0, u32), &a, .{});
+    try tst(@Vector(3, u0), &a, .{ 0, 0, 0 });
 
     try tst(?u32, &a, null);
     try tst(?u32, &a, r.int(u32));
