@@ -3,6 +3,74 @@ pub const DeserializationError = Reader.Error || Allocator.Error || error{Corrup
 
 pub const output_endian: std.builtin.Endian = .little;
 
+fn hasNoAllocLayout(comptime T: type) bool {
+    if (!hasSerializableLayout(T)) return false;
+
+    return switch (@typeInfo(T)) {
+        .type,
+        .comptime_float,
+        .comptime_int,
+        .enum_literal,
+        .undefined,
+        .noreturn,
+        .@"anyframe",
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .null,
+        .error_union,
+        .error_set,
+        => comptime unreachable,
+
+        .@"enum",
+        .void,
+        .bool,
+        .int,
+        .float,
+        => true, // trivial
+
+        .pointer => false,
+
+        inline .vector,
+        .array,
+        => |info| hasNoAllocLayout(info.child),
+
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (!hasNoAllocLayout(field.type))
+                    return false;
+            }
+            return true;
+        },
+
+        .optional => |info| hasNoAllocLayout(info.child),
+
+        .@"union" => |info| {
+            inline for (info.fields) |field| {
+                if (!hasNoAllocLayout(field.type))
+                    return false;
+            }
+            return true;
+        },
+    };
+}
+
+test hasNoAllocLayout {
+    try std.testing.expect(hasNoAllocLayout(u8));
+    try std.testing.expect(hasNoAllocLayout(?u8));
+    try std.testing.expect(hasNoAllocLayout([10]u8));
+    try std.testing.expect(hasNoAllocLayout(@Vector(10, u8)));
+    try std.testing.expect(hasNoAllocLayout(struct { foo: u8, bar: u8 }));
+    try std.testing.expect(hasNoAllocLayout(union(enum) { foo: u8, bar: u8 }));
+
+    try std.testing.expect(!hasNoAllocLayout([]u8));
+    try std.testing.expect(!hasNoAllocLayout(?[]u8));
+    try std.testing.expect(!hasNoAllocLayout([10][]u8));
+    try std.testing.expect(!hasNoAllocLayout(*[10]u8));
+    try std.testing.expect(!hasNoAllocLayout(struct { foo: u8, baz: []u8, bar: u8 }));
+    try std.testing.expect(!hasNoAllocLayout(union(enum) { foo: u8, baz: []u8, bar: u8 }));
+}
+
 fn hasSerializableLayout(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .type,
@@ -411,10 +479,10 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
             // We use a bool effectively to say if the optional was null (0) or
             // will follow (1)
             if (value.*) |*v| {
-                try w.writeByte(1);
+                try serialize(u1, &@as(u1, 1), w);
                 try serialize(info.child, v, w);
             } else {
-                try w.writeByte(0);
+                try serialize(u1, &@as(u1, 0), w);
             }
         },
 
@@ -434,6 +502,10 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
     }
 }
 
+pub fn deserializeNoAlloc(comptime T: type, r: *Reader) DeserializationError!T {
+    return try deserialize(T, .failing, r);
+}
+
 pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) DeserializationError!T {
     if (comptime !hasSerializableLayout(T)) {
         @compileError(@typeName(T) ++ " not serializable");
@@ -443,13 +515,13 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .void,
         => {}, // zst
 
-        .bool => switch (try deserialize(u1, .failing, r)) {
+        .bool => switch (try deserializeNoAlloc(u1, r)) {
             0 => false,
             1 => true,
         },
 
         .@"enum" => |info| {
-            const int = try deserialize(info.tag_type, .failing, r);
+            const int = try deserializeNoAlloc(info.tag_type, r);
             return std.enums.fromInt(T, int) orelse return error.Corrupt;
         },
 
@@ -467,7 +539,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
 
         .float => |info| blk: {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
-            const int = try deserialize(Int, .failing, r);
+            const int = try deserializeNoAlloc(Int, r);
             break :blk @as(T, @bitCast(int));
         },
 
@@ -551,7 +623,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
 
         .@"struct" => |info| switch (info.layout) {
             .@"packed" => {
-                const backing = try deserialize(info.backing_integer.?, .failing, r);
+                const backing = try deserializeNoAlloc(info.backing_integer.?, r);
                 return @as(T, @bitCast(backing));
             },
 
@@ -568,16 +640,15 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
             },
         },
 
-        .optional => |info| return switch (try r.takeByte()) {
+        .optional => |info| return switch (try deserializeNoAlloc(u1, r)) {
             0 => null,
             1 => try deserialize(info.child, gpa, r),
-            else => error.Corrupt,
         },
 
         .@"union" => |info| switch (info.layout) {
             .@"extern", .@"packed" => comptime unreachable,
             .auto => {
-                const tag = try deserialize(std.meta.Tag(T), .failing, r);
+                const tag = try deserializeNoAlloc(std.meta.Tag(T), r);
 
                 switch (tag) {
                     inline else => |t| {
