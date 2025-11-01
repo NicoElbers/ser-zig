@@ -814,6 +814,121 @@ test serialize {
     try tst(union(enum(u32)) { foo: u32, bar: u32 }, &a, .{ .foo = r.int(u32) });
 }
 
+test "serialization size" {
+    const size = struct {
+        pub fn size(comptime T: type, expected: usize) !void {
+            var dw: Writer.Discarding = .init(&.{});
+            const w = &dw.writer;
+
+            const value: T = undefined;
+
+            try serialize(T, &value, w);
+
+            try std.testing.expectEqual(expected, dw.fullCount());
+        }
+    }.size;
+
+    try size(i0, 0);
+    try size(u0, 0);
+    try size(void, 0);
+
+    try size(u1, 1);
+    try size(i1, 1);
+    try size(u8, 1);
+    try size(u9, 2);
+
+    // also on 32 bit architectures
+    try size(usize, 8);
+    try size(isize, 8);
+
+    try size(u18, 3);
+    try size(u24, 3);
+    try size(u32, 4);
+
+    try size(f16, 2);
+    try size(f32, 4);
+    try size(f64, 8);
+    try size(f80, 10);
+    try size(f128, 16);
+
+    try size(bool, 1);
+
+    try size(enum { foo }, 0);
+    try size(enum(u8) { foo }, 1);
+    try size(enum { foo, bar }, 1);
+
+    try size(?void, 1);
+    try size(?bool, 2);
+    try size(?u8, 2);
+    try size(?u18, 4);
+
+    try size([10]u8, 10);
+    try size([10]u10, 20);
+
+    // No bit packing, that just makes life hell
+    try size(@Vector(4, bool), 4);
+    try size(@Vector(4, u1), 4);
+    try size(@Vector(4, i1), 4);
+    try size([4]bool, 4);
+    try size([4]u1, 4);
+    try size([4]i1, 4);
+
+    // 0 stays 0
+    try size(void, 0);
+    try size(i0, 0);
+    try size(u0, 0);
+    try size([0]u8, 0);
+    try size(@Vector(0, u8), 0);
+    try size([4]u0, 0);
+    try size([4]i0, 0);
+    try size(@Vector(4, u0), 0);
+    try size(@Vector(4, i0), 0);
+
+    // No padding
+    try size(struct { foo: u8, bar: u1, baz: u24 }, 1 + 1 + 3);
+
+    { // Can't serialize an undefined union
+        const Union = union(enum(u8)) { foo: u8, bar: u1, baz: u24 };
+        const expected = 1 + 3;
+
+        var dw: Writer.Discarding = .init(&.{});
+        const w = &dw.writer;
+
+        const value: Union = .{ .baz = maxInt(u24) };
+
+        try serialize(Union, &value, w);
+
+        try std.testing.expectEqual(expected, dw.fullCount());
+    }
+}
+
+test "serialized slice length" {
+    const sliceSize = struct {
+        pub fn sliceSize(
+            comptime T: type,
+            slice: []const T,
+            expected_bytes: usize,
+        ) !void {
+            var dw: Writer.Discarding = .init(&.{});
+
+            try serialize([]const T, &slice, &dw.writer);
+
+            try std.testing.expectEqual(expected_bytes, dw.fullCount());
+        }
+    }.sliceSize;
+
+    const gpa = std.testing.allocator;
+
+    try sliceSize(u24, &.{ 1, 2, 3, 4, 5, 6 }, 1 + 6 * 3);
+
+    {
+        const slice = try gpa.alloc(u8, maxInt(u16) + 1);
+        defer gpa.free(slice);
+
+        try sliceSize(u8, slice[0..maxInt(u16)], 3 + maxInt(u16));
+        try sliceSize(u8, slice[0 .. maxInt(u16) + 1], 9 + maxInt(u16) + 1);
+    }
+}
 
 /// Optimized for small lengths.
 /// We do a fairly simple approach where we:
