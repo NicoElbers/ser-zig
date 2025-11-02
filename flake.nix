@@ -6,7 +6,6 @@
 
     zig = {
       url = "github:silversquirl/zig-flake/compat";
-      inputs.nixpkgs.follows = "nixpkgs";
     };
 
     zls = {
