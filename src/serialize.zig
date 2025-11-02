@@ -765,81 +765,22 @@ test "serialized slice length" {
         defer gpa.free(slice);
 
         try sliceSize(u8, slice[0..maxInt(u16)], 3 + maxInt(u16));
-        try sliceSize(u8, slice[0 .. maxInt(u16) + 1], 9 + maxInt(u16) + 1);
+        try sliceSize(u8, slice[0 .. maxInt(u16) + 1], 4 + maxInt(u16));
     }
 }
 
-/// Optimized for small lengths.
-/// We do a fairly simple approach where we:
-/// 1) take a byte
-/// 2) if the byte from (1) did not have the top bit set, that's
-///    the length.
-/// 3) if the byte from (1) is 0b1000_0000, take the next 2
-///    bytes (u16) as length.
-/// 4) if the byte from (1) is 0b1100_0000, take the next 8
-///    bytes (u64) as length.
-///
-/// The thinking here is that:
-/// * For very short slices you don't want to waste any bytes on
-///   the length.
-/// * On slices of 128 elements those 8 bytes might be something
-///   but 3 bytes is only 'wasting' 1 byte, which is fine for
-///   simplicity purposes.
-/// * After 65535 elements, we just use all 8 bytes, it doesn't
-///   matter anymore.
+/// Uses Leb128 to encode length
 pub fn serializeLength(length: usize, w: *Writer) SerializationError!void {
-    switch (@as(u64, length)) {
-        0...maxInt(u7) => {
-            const len: u7 = @intCast(length);
-            try serialize(u7, &len, w);
-        },
-        maxInt(u7) + 1...maxInt(u16) => {
-            const byte_len: u8 = 0b1000_0000;
-            try serialize(u8, &byte_len, w);
-
-            const len: u16 = @intCast(length);
-            try serialize(u16, &len, w);
-        },
-        maxInt(u16) + 1...maxInt(u64) => {
-            const byte_len: u8 = 0b1100_0000;
-            try serialize(u8, &byte_len, w);
-
-            const len: u64 = @intCast(length);
-            try serialize(u64, &len, w);
-        },
-    }
+    try w.writeLeb128(length);
 }
 
-/// Optimized for small lengths.
-/// We do a fairly simple approach where we:
-/// 1) take a byte
-/// 2) if the byte from (1) did not have the top bit set, that's
-///    the length.
-/// 3) if the byte from (1) is 0b1000_0000, take the next 2
-///    bytes (u16) as length.
-/// 4) if the byte from (1) is 0b1100_0000, take the next 8
-///    bytes (u64) as length.
-///
-/// The thinking here is that:
-/// * For very short slices you don't want to waste any bytes on
-///   the length.
-/// * On slices of 128 elements those 8 bytes might be something
-///   but 3 bytes is only 'wasting' 1 byte, which is fine for
-///   simplicity purposes.
-/// * After 65535 elements, we just use all 8 bytes, it doesn't
-///   matter anymore.
+/// Uses Leb128 to encode length
 pub fn deserializeLength(r: *Reader) DeserializationError!usize {
-    const length_64: u64 = switch (try deserialize(u8, .failing, r)) {
-        0...maxInt(u7) => |len| len,
-        0b1000_0000 => try deserialize(u16, .failing, r),
-        0b1100_0000 => try deserialize(u64, .failing, r),
-        else => return error.Corrupt,
+    return r.takeLeb128(usize) catch |err| switch (err) {
+        error.ReadFailed => return error.ReadFailed,
+        error.EndOfStream => return error.EndOfStream,
+        error.Overflow => return error.Corrupt,
     };
-
-    // If we cannot load the amount of elements, the file might as well be
-    // corrupt
-    return std.math.cast(usize, length_64) orelse
-        return error.Corrupt;
 }
 
 test "serializing length" {
@@ -876,11 +817,11 @@ test "serializing length" {
         try tst(&a, len, 1);
     }
     try tst(&a, 0b0111_1111, 1);
-    try tst(&a, 0b1000_0000, 3);
+    try tst(&a, 0b1000_0000, 2);
 
     try tst(&a, maxInt(u16), 3);
-    try tst(&a, maxInt(u16) + 1, 9);
-    try tst(&a, maxInt(u32), 9);
+    try tst(&a, maxInt(u16) + 1, 3);
+    try tst(&a, maxInt(u32), 5);
 
     if (@sizeOf(usize) >= 64) {
         try tst(&a, maxInt(u32) + 1, 9);
