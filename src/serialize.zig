@@ -1,5 +1,6 @@
 pub const SerializationError = Writer.Error;
-pub const DeserializationError = Reader.Error || Allocator.Error || error{Corrupt};
+pub const DeserializationNoAllocError = Reader.Error || error{Corrupt};
+pub const DeserializationError = DeserializationNoAllocError || Allocator.Error;
 
 pub const output_endian: std.builtin.Endian = .little;
 
@@ -226,6 +227,343 @@ test typeHash {
     );
 }
 
+pub const SerializeIntMode = enum {
+    leb,
+    fixed,
+
+    pub inline fn auto(comptime T: type) SerializeIntMode {
+        const info = @typeInfo(T).int;
+
+        // If it fits in a byte, we can't do any better anyway
+        if (info.bits <= 8) return .fixed;
+
+        // Otherwise we have no size degradation until after maxInt(u14) + 1
+        // (aka 16_384) which is high enough that that extra byte is fine probably
+        return .leb; // TODO: more smart logic?
+    }
+};
+
+fn serializeInt(comptime T: type, value: T, w: *Writer, comptime mode: SerializeIntMode) SerializationError!void {
+    if (@typeInfo(T).int.bits == 0) return;
+
+    switch (T) {
+        isize => {
+            const extended: i64 = value;
+            return serializeInt(i64, extended, w, mode);
+        },
+        usize => {
+            const extended: u64 = value;
+            return serializeInt(u64, extended, w, mode);
+        },
+
+        c_char,
+        c_short,
+        c_ushort,
+        c_int,
+        c_long,
+        c_ulong,
+        c_longlong,
+        c_ulonglong,
+        c_longdouble,
+        => @compileError(@typeName(T) ++ " is kinda tricky, and thus unsupported"),
+
+        else => {},
+    }
+
+    return switch (mode) {
+        .fixed => blk: {
+            const Int = std.math.ByteAlignedInt(T);
+
+            const info = @typeInfo(Int).int;
+            comptime assert(info.bits >= 8);
+            comptime assert(info.bits % 8 == 0);
+
+            const extended: Int = value;
+
+            break :blk w.writeInt(Int, extended, output_endian);
+        },
+        .leb => blk: {
+            break :blk leb.writeLeb128(w, value);
+        },
+    };
+}
+
+fn deserializeInt(comptime T: type, r: *Reader, comptime mode: SerializeIntMode) DeserializationError!T {
+    if (@typeInfo(T).int.bits == 0) return 0;
+
+    switch (T) {
+        isize => return std.math.cast(
+            isize,
+            try deserializeInt(i64, r, mode),
+        ) orelse error.Corrupt,
+        usize => return std.math.cast(
+            usize,
+            try deserializeInt(u64, r, mode),
+        ) orelse error.Corrupt,
+
+        c_char,
+        c_short,
+        c_ushort,
+        c_int,
+        c_long,
+        c_ulong,
+        c_longlong,
+        c_ulonglong,
+        c_longdouble,
+        => @compileError(@typeName(T) ++ " is kinda tricky, and thus unsupported"),
+
+        else => {},
+    }
+
+    return std.math.cast(T, switch (mode) {
+        .fixed => blk: {
+            const Int = std.math.ByteAlignedInt(T);
+
+            const info = @typeInfo(Int).int;
+            comptime assert(info.bits >= 8);
+            comptime assert(info.bits % 8 == 0);
+
+            break :blk try r.takeInt(Int, output_endian);
+        },
+        .leb => leb.takeLeb128(r, T) catch |err| switch (err) {
+            error.ReadFailed => return error.ReadFailed,
+            error.EndOfStream => return error.EndOfStream,
+            error.Overflow => return error.Corrupt,
+        },
+    }) orelse return error.Corrupt;
+}
+
+test "serializing ints" {
+    const tst = struct {
+        pub fn tst(comptime T: type, value: T) !void {
+            var buf: [20]u8 = undefined;
+
+            inline for (.{ .fixed, .leb }) |mode| {
+                var fw: Writer = .fixed(&buf);
+                try serializeInt(T, value, &fw, mode);
+
+                var fr: Reader = .fixed(fw.buffered());
+                const res = try deserializeInt(T, &fr, mode);
+
+                try std.testing.expectEqual(value, res);
+            }
+        }
+    }.tst;
+
+    try tst(u0, 0);
+    try tst(i1, 0);
+    try tst(i1, -1);
+    try tst(u1, 0);
+    try tst(u1, 1);
+
+    try tst(u8, @truncate(0xFE2C85283EB2B64F));
+    try tst(i8, @truncate(-0xFE2C85283EB2B64F));
+
+    try tst(usize, @truncate(0x11986E3C2E3B624E));
+    try tst(isize, @truncate(0xC5E2C83A20B057CE));
+    try tst(isize, @truncate(-0xFE2C85283EB2B64F));
+
+    try tst(u128, @truncate(0x8A0DD299C96112C28CCF6B1D7E27BAF7));
+    try tst(i128, @truncate(-0x9037A1E9979CFAC8A64F7A37119C2BC0));
+}
+
+fn MutableSlice(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .array => |info| @Type(.{ .pointer = .{
+            .size = .slice,
+            .is_const = false,
+            .is_volatile = false,
+            .alignment = @alignOf(info.child),
+            .address_space = .generic,
+            .child = info.child,
+            .is_allowzero = false,
+            .sentinel_ptr = info.sentinel_ptr,
+        } }),
+        .pointer => |info| switch (info.size) {
+            .slice => @Type(.{ .pointer = .{
+                .size = .slice,
+                .is_const = false,
+                .is_volatile = info.is_volatile,
+                .alignment = info.alignment,
+                .address_space = info.address_space,
+                .child = info.child,
+                .is_allowzero = info.is_allowzero,
+                .sentinel_ptr = info.sentinel_ptr,
+            } }),
+            .many => comptime unreachable, // TODO: implement sentinel thingies
+            else => comptime unreachable,
+        },
+        else => comptime unreachable,
+    };
+}
+
+fn Slice(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .array => |info| @Type(.{ .pointer = .{
+            .size = .slice,
+            .is_const = true,
+            .is_volatile = false,
+            .alignment = @alignOf(info.child),
+            .address_space = .generic,
+            .child = info.child,
+            .is_allowzero = false,
+            .sentinel_ptr = info.sentinel_ptr,
+        } }),
+        .pointer => |info| switch (info.size) {
+            .slice => @Type(.{ .pointer = .{
+                .size = .slice,
+                .is_const = true,
+                .is_volatile = info.is_volatile,
+                .alignment = info.alignment,
+                .address_space = info.address_space,
+                .child = info.child,
+                .is_allowzero = info.is_allowzero,
+                .sentinel_ptr = info.sentinel_ptr,
+            } }),
+            .many => comptime unreachable, // TODO: implement sentinel thingies
+            else => comptime unreachable,
+        },
+        else => comptime unreachable,
+    };
+}
+
+fn listShortcut(comptime Child: type) bool {
+    return switch (@typeInfo(Child)) {
+        .int => |info| (native_endian == output_endian or info.bits == 8) and
+            @bitSizeOf(Child) == @sizeOf(Child) * 8 and // no padding
+            info.bits % 8 == 0 and
+            SerializeIntMode.auto(Child) == .fixed,
+
+        .float => switch (Child) {
+            f16, f32, f64, f128 => native_endian == output_endian,
+            f80 => false, // has padding
+            else => comptime unreachable,
+        },
+
+        .@"enum" => |info| listShortcut(info.tag_type),
+
+        .@"struct" => |info| info.layout == .@"packed" and listShortcut(info.backing_integer.?),
+
+        else => false,
+    };
+}
+
+test listShortcut {
+    try std.testing.expect(listShortcut(u8));
+    try std.testing.expect(listShortcut(i8));
+
+    if (native_endian == output_endian) {
+        try std.testing.expect(listShortcut(f16));
+        try std.testing.expect(listShortcut(f32));
+        try std.testing.expect(listShortcut(f64));
+        try std.testing.expect(listShortcut(f128));
+    }
+
+    try std.testing.expect(listShortcut(enum(i8) {}));
+    try std.testing.expect(listShortcut(enum(u8) {}));
+    try std.testing.expect(listShortcut(packed struct { foo: u8 }));
+    try std.testing.expect(listShortcut(packed struct { foo: bool, bar: u7 }));
+
+    try std.testing.expect(!listShortcut(u3));
+    try std.testing.expect(!listShortcut(i3));
+    try std.testing.expect(!listShortcut(u16));
+    try std.testing.expect(!listShortcut(f80));
+    try std.testing.expect(!listShortcut(enum(i3) {}));
+    try std.testing.expect(!listShortcut(packed struct { foo: u7 }));
+}
+
+// Serializes a list of items **DOES NOT** serialize the length
+pub fn serializeList(comptime T: type, slice: Slice(T), w: *Writer) SerializationError!void {
+    const info = @typeInfo(MutableSlice(T)).pointer;
+
+    if (@sizeOf(info.child) == 0) return;
+
+    if (comptime listShortcut(info.child)) {
+        comptime assert(@bitSizeOf(info.child) == @sizeOf(info.child) * 8); // no padding;
+
+        try w.writeAll(@ptrCast(slice));
+    } else {
+        for (slice) |*elem| {
+            try serialize(info.child, elem, w);
+        }
+    }
+}
+
+pub fn deserializeListNoAlloc(comptime T: type, slice: MutableSlice(T), r: *Reader) DeserializationNoAllocError!void {
+    comptime assert(hasNoAllocLayout(@typeInfo(MutableSlice(T)).pointer.child));
+    return deserializeList(T, slice, .failing, r) catch |err| switch (err) {
+        error.ReadFailed => error.ReadFailed,
+        error.EndOfStream => error.EndOfStream,
+        error.Corrupt => error.Corrupt,
+        error.OutOfMemory => unreachable,
+    };
+}
+
+pub fn deserializeList(comptime T: type, slice: MutableSlice(T), gpa: Allocator, r: *Reader) DeserializationError!void {
+    const info = @typeInfo(MutableSlice(T)).pointer;
+
+    if (@sizeOf(info.child) == 0) return;
+
+    if (comptime listShortcut(info.child)) {
+        comptime assert(@bitSizeOf(info.child) == @sizeOf(info.child) * 8); // no padding;
+
+        try r.readSliceAll(@ptrCast(slice));
+    } else {
+        for (slice) |*elem| {
+            elem.* = try deserialize(info.child, gpa, r);
+        }
+    }
+}
+
+test "serialize list" {
+    const tst = struct {
+        pub fn tst(comptime T: type, comptime len: usize, input: [len]T) !void {
+            {
+                var buf: [len * @sizeOf(T) * 2]u8 = undefined;
+                var fw: Writer = .fixed(&buf);
+
+                try serializeList([len]T, &input, &fw);
+
+                var fr: Reader = .fixed(fw.buffered());
+                var out: [len]T = undefined;
+                try deserializeList([len]T, &out, .failing, &fr);
+
+                try std.testing.expectEqualSlices(T, &input, &out);
+            }
+            {
+                var buf: [len * @sizeOf(T) * 2]u8 = undefined;
+                var fw: Writer = .fixed(&buf);
+
+                try serializeList([]T, &input, &fw);
+
+                var fr: Reader = .fixed(fw.buffered());
+                var out: [len]T = undefined;
+                try deserializeList([]T, &out, .failing, &fr);
+
+                try std.testing.expectEqualSlices(T, &input, &out);
+            }
+        }
+    }.tst;
+
+    try tst(u64, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(u32, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(u8, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(u1, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(u0, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+
+    try tst(i64, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(-0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(i32, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(-0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(i8, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(-0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(i1, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(-0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+    try tst(i0, 3, .{ @truncate(0x9DE43B7B36ACDB41), @truncate(-0xEF8989553C92038A), @truncate(0xD265BD2DBDE99BC7) });
+
+    try tst(enum(u8) { _ }, 3, .{ @enumFromInt(0x27), @enumFromInt(0x59), @enumFromInt(0x91) });
+    try tst(enum(u32) { _ }, 3, .{ @enumFromInt(0x51BD1B00), @enumFromInt(0x83FD19CD), @enumFromInt(0x5065E859) });
+    try tst(enum(u32) { a = 0x51BD1B00, b = 0x83FD19CD, c = 0x5065E859 }, 3, .{ .a, .b, .c });
+
+    try tst(packed struct { foo: u8 }, 3, .{ .{ .foo = 0x18 }, .{ .foo = 0x8B }, .{ .foo = 0x2D } });
+}
+
 pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationError!void {
     if (comptime !hasSerializableLayout(T)) {
         @compileError(@typeName(T) ++ " not serializable");
@@ -235,41 +573,30 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
         .void,
         => {}, // zst
 
-        .bool => try serialize(u1, @ptrCast(value), w),
+        .bool => try serializeInt(u1, @intFromBool(value.*), w, .fixed),
 
-        .@"enum" => |info| try serialize(info.tag_type, &@intFromEnum(value.*), w),
+        .@"enum" => |info| try serializeInt(
+            info.tag_type,
+            @intFromEnum(value.*),
+            w,
+            .auto(info.tag_type),
+        ),
 
         .float => |info| {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
-            try serialize(Int, @ptrCast(value), w);
-        },
-        .int => {
-            // TODO: think about the c integers
 
-            // {u,i}size does not have a defined layout, so we default to 64 bit
-            // to ensure compatibility between 32 and 64 bit systems
-            const Int = switch (T) {
-                usize => u64,
-                isize => i64,
-                else => std.math.ByteAlignedInt(T),
-            };
-
-            try w.writeInt(Int, value.*, output_endian);
+            // Since the upper bits set for the exponent, so we might as well
+            // expect that and serialize as fixed length
+            try serializeInt(Int, @bitCast(value.*), w, .fixed);
         },
+
+        .int => try serializeInt(T, value.*, w, .auto(T)),
 
         .pointer => |info| switch (info.size) {
             .slice => {
-                try serializeLength(value.len, w);
-
-                if (info.child == u8) {
-                    try w.writeAll(value.*);
-                } else if (@sizeOf(info.child) != 0) {
-                    // No need to serialize items of 0 ABI size
-
-                    for (value.*) |*elem| {
-                        try serialize(info.child, elem, w);
-                    }
-                }
+                // Lower values are very common
+                try serializeInt(usize, value.len, w, .leb);
+                try serializeList(T, value.*, w);
             },
             .one => try serialize(info.child, value.*, w),
 
@@ -291,15 +618,8 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
             }
         },
         .array => |info| {
-            if (info.child == u8) {
-                try w.writeAll(value);
-            } else if (@sizeOf(info.child) != 0) {
-                // No need to serialize items of 0 ABI size
-
-                for (value) |*elem| {
-                    try serialize(info.child, elem, w);
-                }
-            }
+            const slice: Slice(T) = value[0..info.len];
+            try serializeList(T, slice, w);
         },
 
         .@"struct" => |info| switch (info.layout) {
@@ -342,7 +662,13 @@ pub fn serialize(comptime T: type, value: *const T, w: *Writer) SerializationErr
 }
 
 pub fn deserializeNoAlloc(comptime T: type, r: *Reader) DeserializationError!T {
-    return try deserialize(T, .failing, r);
+    comptime assert(hasNoAllocLayout(T));
+    return deserialize(T, .failing, r) catch |err| switch (err) {
+        error.ReadFailed => error.ReadFailed,
+        error.EndOfStream => error.EndOfStream,
+        error.Corrupt => error.Corrupt,
+        error.OutOfMemory => unreachable,
+    };
 }
 
 pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) DeserializationError!T {
@@ -354,37 +680,27 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         .void,
         => {}, // zst
 
-        .bool => switch (try deserializeNoAlloc(u1, r)) {
+        .bool => switch (try deserializeInt(u1, r, .fixed)) {
             0 => false,
             1 => true,
         },
 
         .@"enum" => |info| {
-            const int = try deserializeNoAlloc(info.tag_type, r);
+            const int = try deserializeInt(info.tag_type, r, .auto(info.tag_type));
             return std.enums.fromInt(T, int) orelse return error.Corrupt;
         },
 
-        .int => |info| {
-            // {u,i}size does not have a defined layout, so we default to 64 bit
-            // to ensure compatibility between 32 and 64 bit systems
-            const bits = if (T == usize or T == isize) 64 else @bitSizeOf(T);
-            const Int = std.math.ByteAlignedInt(
-                @Type(.{ .int = .{ .bits = bits, .signedness = info.signedness } }),
-            );
-
-            const int = try r.takeInt(Int, output_endian);
-            return std.math.cast(T, int) orelse return error.Corrupt;
-        },
+        .int => try deserializeInt(T, r, .auto(T)),
 
         .float => |info| blk: {
             const Int = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
-            const int = try deserializeNoAlloc(Int, r);
+            const int = try deserializeInt(Int, r, .fixed);
             break :blk @as(T, @bitCast(int));
         },
 
         .pointer => |info| switch (info.size) {
             .slice => {
-                const length = try deserializeLength(r);
+                const length = try deserializeInt(usize, r, .leb);
 
                 const slice = try gpa.allocWithOptions(
                     info.child,
@@ -394,21 +710,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
                 );
                 errdefer gpa.free(slice);
 
-                if (info.child == u8) {
-                    var fw: Writer = .fixed(slice);
-                    r.streamExact(&fw, length) catch |err| switch (err) {
-                        error.ReadFailed => return error.ReadFailed,
-                        error.EndOfStream => return error.EndOfStream,
-                        error.WriteFailed => unreachable,
-                    };
-                    assert(fw.end == length);
-                } else if (@sizeOf(info.child) != 0) {
-                    // No need to deserialize items of 0 ABI size
-
-                    for (slice) |*elem| {
-                        elem.* = try deserialize(info.child, gpa, r);
-                    }
-                }
+                try deserializeList(T, slice, gpa, r);
 
                 return slice;
             },
@@ -440,23 +742,7 @@ pub fn deserialize(comptime T: type, gpa: Allocator, r: *Reader) Deserialization
         },
         .array => |info| {
             var arr: T = undefined;
-
-            if (info.child == u8) {
-                var fw: Writer = .fixed(&arr);
-                r.streamExact(&fw, info.len) catch |err| switch (err) {
-                    error.ReadFailed => return error.ReadFailed,
-                    error.EndOfStream => return error.EndOfStream,
-                    error.WriteFailed => unreachable,
-                };
-                assert(fw.end == info.len);
-            } else if (@sizeOf(info.child) != 0) {
-                // No need to deserialize items of 0 ABI size
-
-                for (&arr) |*elem| {
-                    elem.* = try deserialize(info.child, gpa, r);
-                }
-            }
-
+            try deserializeList(T, arr[0..info.len], gpa, r);
             return arr;
         },
 
@@ -653,182 +939,6 @@ test "serialization and deserialization" {
     try tst(union(enum(u32)) { foo: u32, bar: u32 }, &a, .{ .foo = r.int(u32) });
 }
 
-test "serialization size" {
-    const size = struct {
-        pub fn size(comptime T: type, expected: usize) !void {
-            var dw: Writer.Discarding = .init(&.{});
-            const w = &dw.writer;
-
-            const value: T = undefined;
-
-            try serialize(T, &value, w);
-
-            try std.testing.expectEqual(expected, dw.fullCount());
-        }
-    }.size;
-
-    try size(i0, 0);
-    try size(u0, 0);
-    try size(void, 0);
-
-    try size(u1, 1);
-    try size(i1, 1);
-    try size(u8, 1);
-    try size(u9, 2);
-
-    // also on 32 bit architectures
-    try size(usize, 8);
-    try size(isize, 8);
-
-    try size(u18, 3);
-    try size(u24, 3);
-    try size(u32, 4);
-
-    try size(f16, 2);
-    try size(f32, 4);
-    try size(f64, 8);
-    try size(f80, 10);
-    try size(f128, 16);
-
-    try size(bool, 1);
-
-    try size(enum { foo }, 0);
-    try size(enum(u8) { foo }, 1);
-    try size(enum { foo, bar }, 1);
-
-    try size(?void, 1);
-    try size(?bool, 2);
-    try size(?u8, 2);
-    try size(?u18, 4);
-
-    try size([10]u8, 10);
-    try size([10]u10, 20);
-
-    // No bit packing, that just makes life hell
-    try size(@Vector(4, bool), 4);
-    try size(@Vector(4, u1), 4);
-    try size(@Vector(4, i1), 4);
-    try size([4]bool, 4);
-    try size([4]u1, 4);
-    try size([4]i1, 4);
-
-    // 0 stays 0
-    try size(void, 0);
-    try size(i0, 0);
-    try size(u0, 0);
-    try size([0]u8, 0);
-    try size(@Vector(0, u8), 0);
-    try size([4]u0, 0);
-    try size([4]i0, 0);
-    try size(@Vector(4, u0), 0);
-    try size(@Vector(4, i0), 0);
-
-    // No padding
-    try size(struct { foo: u8, bar: u1, baz: u24 }, 1 + 1 + 3);
-
-    { // Can't serialize an undefined union
-        const Union = union(enum(u8)) { foo: u8, bar: u1, baz: u24 };
-        const expected = 1 + 3;
-
-        var dw: Writer.Discarding = .init(&.{});
-        const w = &dw.writer;
-
-        const value: Union = .{ .baz = maxInt(u24) };
-
-        try serialize(Union, &value, w);
-
-        try std.testing.expectEqual(expected, dw.fullCount());
-    }
-}
-
-test "serialized slice length" {
-    const sliceSize = struct {
-        pub fn sliceSize(
-            comptime T: type,
-            slice: []const T,
-            expected_bytes: usize,
-        ) !void {
-            var dw: Writer.Discarding = .init(&.{});
-
-            try serialize([]const T, &slice, &dw.writer);
-
-            try std.testing.expectEqual(expected_bytes, dw.fullCount());
-        }
-    }.sliceSize;
-
-    const gpa = std.testing.allocator;
-
-    try sliceSize(u24, &.{ 1, 2, 3, 4, 5, 6 }, 1 + 6 * 3);
-
-    {
-        const slice = try gpa.alloc(u8, maxInt(u16) + 1);
-        defer gpa.free(slice);
-
-        try sliceSize(u8, slice[0..maxInt(u16)], 3 + maxInt(u16));
-        try sliceSize(u8, slice[0 .. maxInt(u16) + 1], 4 + maxInt(u16));
-    }
-}
-
-/// Uses Leb128 to encode length
-pub fn serializeLength(length: usize, w: *Writer) SerializationError!void {
-    try w.writeLeb128(length);
-}
-
-/// Uses Leb128 to encode length
-pub fn deserializeLength(r: *Reader) DeserializationError!usize {
-    return r.takeLeb128(usize) catch |err| switch (err) {
-        error.ReadFailed => return error.ReadFailed,
-        error.EndOfStream => return error.EndOfStream,
-        error.Overflow => return error.Corrupt,
-    };
-}
-
-test "serializing length" {
-    const Arena = std.heap.ArenaAllocator;
-
-    const tst = struct {
-        pub fn tst(
-            arena: *Arena,
-            len: usize,
-            expected_bytes: usize,
-        ) !void {
-            _ = arena.reset(.retain_capacity);
-
-            var aw: Writer.Allocating = .init(arena.allocator());
-            defer aw.deinit();
-
-            try serializeLength(len, &aw.writer);
-
-            try std.testing.expectEqual(expected_bytes, aw.written().len);
-
-            var fr: Reader = .fixed(aw.written());
-
-            const copy = try deserializeLength(&fr);
-
-            try std.testing.expectEqual(aw.written().len, fr.end);
-            try std.testing.expectEqual(len, copy);
-        }
-    }.tst;
-
-    var a: Arena = .init(std.testing.allocator);
-    defer a.deinit();
-
-    for (0..maxInt(u7)) |len| {
-        try tst(&a, len, 1);
-    }
-    try tst(&a, 0b0111_1111, 1);
-    try tst(&a, 0b1000_0000, 2);
-
-    try tst(&a, maxInt(u16), 3);
-    try tst(&a, maxInt(u16) + 1, 3);
-    try tst(&a, maxInt(u32), 5);
-
-    if (@sizeOf(usize) >= 64) {
-        try tst(&a, maxInt(u32) + 1, 9);
-        try tst(&a, maxInt(u64), 9);
-    }
-}
-
 pub fn serializeMultiArrayList(
     comptime T: type,
     mal: *const MultiArrayList(T),
@@ -837,7 +947,7 @@ pub fn serializeMultiArrayList(
     const MT = MultiArrayList(T);
     const Field = MT.Field;
 
-    try serializeLength(mal.len, w);
+    try serializeInt(usize, mal.len, w, .leb);
     inline for (sortStructFields(T)) |field| {
         const items = mal.items(std.meta.stringToEnum(Field, field.name).?);
         assert(items.len == mal.len);
@@ -856,7 +966,7 @@ pub fn deserializeMultiArrayList(
     const MT = MultiArrayList(T);
     const Field = MT.Field;
 
-    const len = try deserializeLength(r);
+    const len = try deserializeInt(usize, r, .leb);
 
     const byte_length = MT.capacityInBytes(len);
     const bytes = try gpa.alignedAlloc(u8, .of(T), byte_length);
@@ -1309,6 +1419,10 @@ fn eqlMultiArrayList(comptime T: type, a: *const MultiArrayList(T), b: *const Mu
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
+const leb = @import("leb.zig");
+
+const native_endian = builtin.cpu.arch.endian();
 
 const maxInt = std.math.maxInt;
 const assert = std.debug.assert;
