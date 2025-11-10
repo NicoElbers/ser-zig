@@ -8,7 +8,7 @@ pub const serialize = struct {
 
     pub const value = funcs.serialize;
 
-    pub const length = funcs.serializeLength;
+    pub const int = funcs.serializeInt;
 
     pub const multiArrayList = funcs.serializeMultiArrayList;
     pub const arrayList = funcs.serializeArrayList;
@@ -21,7 +21,7 @@ pub const deserialize = struct {
     pub const value = funcs.deserialize;
     pub const valueNoAlloc = funcs.deserializeNoAlloc;
 
-    pub const length = funcs.deserializeLength;
+    pub const int = funcs.deserializeInt;
 
     pub const multiArrayList = funcs.deserializeMultiArrayList;
     pub const arrayList = funcs.deserializeArrayList;
