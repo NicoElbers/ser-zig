@@ -5,6 +5,8 @@ pub const ser = struct {
 
     pub const any = serzig.serializeAny;
 
+    pub const anyPointer = serzig.serializeAnyPointer;
+
     pub const @"bool" = serzig.serializeBool;
     pub const @"enum" = serzig.serializeEnum;
     pub const @"struct" = serzig.serializeStruct;
@@ -23,6 +25,8 @@ pub const deser = struct {
 
     pub const any = serzig.deserializeAny;
     pub const anyAlloc = serzig.deserializeAnyAlloc;
+
+    pub const anyPointer = serzig.deserializeAnyPointer;
 
     pub const @"bool" = serzig.deserializeBool;
     pub const @"enum" = serzig.deserializeEnum;
