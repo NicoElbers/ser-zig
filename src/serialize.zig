@@ -12,7 +12,7 @@ fn requiresAllocation(comptime T: type) void {
     @compileError(@typeName(T) ++ " requires allocation");
 }
 
-fn serializeAny(comptime T: type, w: *Writer, value: *const T) SerializationError!void {
+pub fn serializeAny(comptime T: type, w: *Writer, value: *const T) SerializationError!void {
     try switch (@typeInfo(T)) {
         .@"enum" => serializeEnum(T, w, value.*),
         .@"struct" => serializeStruct(T, w, value),
@@ -29,7 +29,7 @@ fn serializeAny(comptime T: type, w: *Writer, value: *const T) SerializationErro
     };
 }
 
-fn deserializeAny(comptime T: type, r: *Reader) DeserializationError!T {
+pub fn deserializeAny(comptime T: type, r: *Reader) DeserializationError!T {
     return try switch (@typeInfo(T)) {
         .@"enum" => deserializeEnum(T, r),
         .@"struct" => deserializeStruct(T, r),
@@ -46,7 +46,7 @@ fn deserializeAny(comptime T: type, r: *Reader) DeserializationError!T {
     };
 }
 
-fn deserializeAnyAlloc(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
+pub fn deserializeAnyAlloc(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
     return try switch (@typeInfo(T)) {
         .@"enum" => deserializeEnum(T, r),
         .@"struct" => deserializeStructAlloc(T, r, gpa),
