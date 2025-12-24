@@ -5,9 +5,9 @@ pub fn writeLeb128(w: *Writer, value: anytype) Writer.Error!void {
         else => @compileError(@tagName(T) ++ " not supported"),
     };
 
-    const BoundInt = @Type(.{ .int = .{ .bits = 7, .signedness = info.signedness } });
+    const BoundInt = @Int(info.signedness, 7);
     if (info.bits <= 7 or (value >= std.math.minInt(BoundInt) and value <= std.math.maxInt(BoundInt))) {
-        const SByte = @Type(.{ .int = .{ .bits = 8, .signedness = info.signedness } });
+        const SByte = @Int(info.signedness, 8);
         const byte = switch (info.signedness) {
             .signed => @as(SByte, @intCast(value)) & 0x7F,
             .unsigned => @as(SByte, @intCast(value)),
@@ -49,7 +49,7 @@ pub fn takeLeb128(r: *Reader, comptime T: type) TakeLeb128Error!T {
 
     if (info.bits <= 7) {
         var byte: Byte = undefined;
-        const SBits = @Type(.{ .int = .{ .bits = 7, .signedness = info.signedness } });
+        const SBits = @Int(info.signedness, 7);
 
         byte = @bitCast(try r.takeByte());
         const val = std.math.cast(T, @as(SBits, @bitCast(byte.bits))) orelse error.Overflow;
@@ -75,7 +75,7 @@ pub fn takeLeb128(r: *Reader, comptime T: type) TakeLeb128Error!T {
         } else error.Overflow;
     }
 
-    const Unsigned = @Type(.{ .int = .{ .bits = info.bits, .signedness = .unsigned } });
+    const Unsigned = @Int(.unsigned, info.bits);
     const UInt = std.math.ByteAlignedInt(Unsigned);
     const Int = std.math.ByteAlignedInt(T);
     const LogInt = std.math.Log2Int(UInt);
