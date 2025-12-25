@@ -12,17 +12,17 @@ fn requiresAllocation(comptime T: type) void {
     @compileError(@typeName(T) ++ " requires allocation");
 }
 
-pub fn serializeAny(comptime T: type, w: *Writer, value: *const T) SerializationError!void {
+pub fn serializeAny(comptime T: type, w: *Writer, value: T) SerializationError!void {
     try switch (@typeInfo(T)) {
-        .@"enum" => serializeEnum(T, w, value.*),
+        .@"enum" => serializeEnum(T, w, value),
         .@"struct" => serializeStruct(T, w, value),
-        .@"union" => serializeUnion(T, w, value.*),
+        .@"union" => serializeUnion(T, w, value),
         .array => serializeArray(T, w, value),
-        .bool => serializeBool(w, value.*),
-        .float => serializeFloat(T, w, value.*),
-        .int => serializeInt(T, w, value.*),
-        .optional => serializeOptional(T, w, value.*),
-        .pointer => serializeAnyPointer(T, w, value.*),
+        .bool => serializeBool(w, value),
+        .float => serializeFloat(T, w, value),
+        .int => serializeInt(T, w, value),
+        .optional => serializeOptional(T, w, value),
+        .pointer => serializePointer(T, w, value),
         .vector => serializeVector(T, w, value),
         .void => serializeVoid(w),
         else => cannotBeSerialized(T),
@@ -56,10 +56,27 @@ pub fn deserializeAnyAlloc(comptime T: type, r: *Reader, gpa: Allocator) Deseria
         .float => deserializeFloat(T, r),
         .int => deserializeInt(T, r),
         .optional => deserializeOptionalAlloc(T, r, gpa),
-        .pointer => deserializeAnyPointer(T, r, gpa),
+        .pointer => deserializePointer(T, r, gpa),
         .vector => deserializeVectorAlloc(T, r, gpa),
         .void => deserializeVoid(r),
         else => cannotBeSerialized(T),
+    };
+}
+
+pub fn freeAny(comptime T: type, gpa: Allocator, value: T) void {
+    return switch (@typeInfo(T)) {
+        .@"enum" => {},
+        .@"struct" => freeStruct(T, gpa, value),
+        .@"union" => freeUnion(T, gpa, value),
+        .array => freeArray(T, gpa, value),
+        .bool => {},
+        .float => {},
+        .int => {},
+        .optional => freeOptional(T, gpa, value),
+        .pointer => freePointer(T, gpa, value),
+        .vector => freeVector(T, gpa, value),
+        .void => {},
+        else => {},
     };
 }
 
@@ -71,7 +88,7 @@ test "{de,}serialize void" {
     var w: Writer = .fixed(&buf);
     var r: Reader = .fixed(&buf);
 
-    try serializeAny(void, &w, &{});
+    try serializeAny(void, &w, {});
     try serializeVoid(&w);
 
     try deserializeAny(void, &r);
@@ -80,12 +97,11 @@ test "{de,}serialize void" {
 }
 
 pub fn serializeInt(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (info) {
-        .int => |int| switch (T) {
+    const info = switch (@typeInfo(T)) {
+        .int => |info| switch (T) {
             usize, isize => {
-                comptime assert(int.bits <= 64); // We assume 128 bit systems will not exist
-                const StableInt = @Int(int.signedness, 64);
+                comptime assert(info.bits <= 64); // We assume 128 bit systems will not exist
+                const StableInt = @Int(info.signedness, 64);
                 return try serializeInt(StableInt, w, value);
             },
             c_char,
@@ -99,15 +115,15 @@ pub fn serializeInt(comptime T: type, w: *Writer, value: T) SerializationError!v
             c_ulonglong,
             c_ushort,
             => @compileError(@typeName(T) ++ " does not have a well defined size"),
-            else => {},
+            else => info,
         },
         .comptime_int => @compileError("Cannot serialize comptime_int, please cast it to a runtime int"),
         else => @compileError(@typeName(T) ++ " is not an integer"),
-    }
+    };
 
-    switch (info.int.bits) {
+    switch (info.bits) {
         0...8 => {
-            const SByte = @Int(info.int.signedness, 8);
+            const SByte = @Int(info.signedness, 8);
             try w.writeInt(SByte, value, endian);
         },
         else => try leb.writeLeb128(w, value),
@@ -115,12 +131,11 @@ pub fn serializeInt(comptime T: type, w: *Writer, value: T) SerializationError!v
 }
 
 pub fn deserializeInt(comptime T: type, r: *Reader) DeserializationError!T {
-    const info = @typeInfo(T);
-    switch (info) {
-        .int => |int| switch (T) {
+    const info = switch (@typeInfo(T)) {
+        .int => |info| switch (T) {
             usize, isize => {
-                comptime assert(int.bits <= 64); // We assume 128 bit systems will not exist
-                const StableInt = @Int(int.signedness, 64);
+                comptime assert(info.bits <= 64); // We assume 128 bit systems will not exist
+                const StableInt = @Int(info.signedness, 64);
                 return math.cast(T, try deserializeInt(StableInt, r)) orelse error.Corrupt;
             },
             c_char,
@@ -134,15 +149,15 @@ pub fn deserializeInt(comptime T: type, r: *Reader) DeserializationError!T {
             c_ulonglong,
             c_ushort,
             => @compileError(@typeName(T) ++ " does not have a well defined size"),
-            else => {},
+            else => info,
         },
         .comptime_int => @compileError("Cannot serialize comptime_int, please cast it to a runtime int"),
         else => @compileError(@typeName(T) ++ " is not an integer"),
-    }
+    };
 
-    switch (info.int.bits) {
+    switch (info.bits) {
         0...8 => {
-            const SByte = @Int(info.int.signedness, 8);
+            const SByte = @Int(info.signedness, 8);
             return math.cast(T, try r.takeInt(SByte, endian)) orelse error.Corrupt;
         },
         else => return leb.takeLeb128(r, T) catch |err| switch (err) {
@@ -175,11 +190,12 @@ test "{de,}serialize integers" {
             {
                 var r: Reader = .fixed(w.buffered());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, .failing, found);
                 try std.testing.expectEqual(value, found);
             }
 
             var w2: Writer = .fixed(&buf2);
-            try serializeAny(T, &w2, &value);
+            try serializeAny(T, &w2, value);
             try std.testing.expectEqualSlices(u8, w.buffered(), w2.buffered());
         }
     }.tst;
@@ -197,26 +213,24 @@ test "{de,}serialize integers" {
 }
 
 pub fn serializeFloat(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (info) {
-        .float => {},
+    const info = switch (@typeInfo(T)) {
+        .float => |i| i,
         .comptime_float => @compileError("Cannot serialize comptime_float, please cast it to a runtime float"),
         else => @compileError(@typeName(T) ++ " is not a float"),
-    }
+    };
 
-    const BackingInt = @Int(.unsigned, info.float.bits);
+    const BackingInt = @Int(.unsigned, info.bits);
     try w.writeInt(BackingInt, @bitCast(value), endian);
 }
 
 pub fn deserializeFloat(comptime T: type, r: *Reader) DeserializationError!T {
-    const info = @typeInfo(T);
-    switch (info) {
-        .float => {},
+    const info = switch (@typeInfo(T)) {
+        .float => |i| i,
         .comptime_float => @compileError("Cannot serialize comptime_float, please cast it to a runtime float"),
         else => @compileError(@typeName(T) ++ " is not a float"),
-    }
+    };
 
-    const BackingInt = @Int(.unsigned, info.float.bits);
+    const BackingInt = @Int(.unsigned, info.bits);
     return @bitCast(try r.takeInt(BackingInt, endian));
 }
 
@@ -242,11 +256,12 @@ test "{de,}serialize float" {
             {
                 var r: Reader = .fixed(w.buffered());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, .failing, found);
                 try std.testing.expectEqual(value, found);
             }
 
             var w2: Writer = .fixed(&buf2);
-            try serializeAny(T, &w2, &value);
+            try serializeAny(T, &w2, value);
             try std.testing.expectEqualSlices(u8, w.buffered(), w2.buffered());
         }
     }.tst;
@@ -321,11 +336,12 @@ test "{de,}serialize bool" {
             {
                 var r: Reader = .fixed(w.buffered());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, .failing, found);
                 try std.testing.expectEqual(value, found);
             }
 
             var w2: Writer = .fixed(&buf2);
-            try serializeAny(T, &w2, &value);
+            try serializeAny(T, &w2, value);
             try std.testing.expectEqualSlices(u8, w.buffered(), w2.buffered());
         }
     }.tst;
@@ -334,10 +350,10 @@ test "{de,}serialize bool" {
     try tst(bool, false);
 }
 
-pub fn serializeAnyPointer(comptime T: type, w: *Writer, value: T) SerializationError!void {
+pub fn serializePointer(comptime T: type, w: *Writer, value: T) SerializationError!void {
     try switch (@typeInfo(T)) {
         .pointer => |ptr| switch (ptr.size) {
-            .one => serializePointer(T, w, value),
+            .one => serializeOnePointer(T, w, value),
             .slice,
             .many,
             => serializeSlice(T, w, value),
@@ -347,10 +363,10 @@ pub fn serializeAnyPointer(comptime T: type, w: *Writer, value: T) Serialization
     };
 }
 
-pub fn deserializeAnyPointer(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
+pub fn deserializePointer(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
     return try switch (@typeInfo(T)) {
         .pointer => |ptr| switch (ptr.size) {
-            .one => deserializePointer(T, r, gpa),
+            .one => deserializeOnePointer(T, r, gpa),
             .slice,
             .many,
             => deserializeSlice(T, r, gpa),
@@ -360,60 +376,86 @@ pub fn deserializeAnyPointer(comptime T: type, r: *Reader, gpa: Allocator) Deser
     };
 }
 
-pub fn serializePointer(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (info) {
+pub fn freePointer(comptime T: type, gpa: Allocator, value: T) void {
+    switch (@typeInfo(T)) {
         .pointer => |ptr| switch (ptr.size) {
-            .many,
+            .one => freeOnePointer(T, gpa, value),
             .slice,
-            => @compileError(@typeName(T) ++ " is a type of slice, prefer serializeSlice"),
+            .many,
+            => freeSlice(T, gpa, value),
             .c => cannotBeSerialized(T),
-            .one => {},
         },
         else => @compileError(@typeName(T) ++ " is not a pointer"),
     }
-
-    if (info.pointer.alignment != @alignOf(info.pointer.child)) {
-        const copy = value.*;
-        try serializeAny(info.pointer.child, w, &copy);
-    } else try serializeAny(info.pointer.child, w, value);
 }
 
-pub fn deserializePointer(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
-    const info = @typeInfo(T);
-    switch (info) {
-        .pointer => |ptr| switch (ptr.size) {
+pub fn serializeOnePointer(comptime T: type, w: *Writer, value: T) SerializationError!void {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
             .many,
             .slice,
             => @compileError(@typeName(T) ++ " is a type of slice, prefer serializeSlice"),
             .c => cannotBeSerialized(T),
-            .one => {},
+            .one => info,
         },
         else => @compileError(@typeName(T) ++ " is not a pointer"),
-    }
+    };
 
-    const NonConst = @Pointer(info.pointer.size, .{
+    if (info.alignment < @alignOf(info.child)) {
+        const copy = value.*;
+        try serializeAny(info.child, w, copy);
+    } else try serializeAny(info.child, w, value.*);
+}
+
+pub fn deserializeOnePointer(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
+            .many,
+            .slice,
+            => @compileError(@typeName(T) ++ " is a type of slice, prefer deserializeSlice"),
+            .c => cannotBeSerialized(T),
+            .one => info,
+        },
+        else => @compileError(@typeName(T) ++ " is not a pointer"),
+    };
+
+    const NonConst = @Pointer(info.size, .{
         .@"const" = false,
-        .@"volatile" = info.pointer.is_volatile,
-        .@"allowzero" = info.pointer.is_allowzero,
-        .@"addrspace" = info.pointer.address_space,
-        .@"align" = info.pointer.alignment,
-    }, info.pointer.child, info.pointer.sentinel());
-    const ptr_info = @typeInfo(NonConst).pointer;
+        .@"volatile" = info.is_volatile,
+        .@"allowzero" = info.is_allowzero,
+        .@"addrspace" = info.address_space,
+        .@"align" = info.alignment,
+    }, info.child, info.sentinel());
 
     const raw_bytes = try gpa.allocWithOptions(
         u8,
-        @sizeOf(ptr_info.child),
-        .fromByteUnits(ptr_info.alignment),
+        @sizeOf(info.child),
+        .fromByteUnits(info.alignment),
         null,
     );
     errdefer gpa.free(raw_bytes);
 
     const ptr: NonConst = @ptrCast(raw_bytes);
 
-    ptr.* = try deserializeAnyAlloc(ptr_info.child, r, gpa);
+    ptr.* = try deserializeAnyAlloc(info.child, r, gpa);
 
     return ptr;
+}
+
+pub fn freeOnePointer(comptime T: type, gpa: Allocator, value: T) void {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
+            .many,
+            .slice,
+            => @compileError(@typeName(T) ++ " is a type of slice, prefer freeSlice"),
+            .c => cannotBeSerialized(T),
+            .one => info,
+        },
+        else => @compileError(@typeName(T) ++ " is not a pointer"),
+    };
+
+    freeAny(info.child, gpa, value.*);
+    gpa.destroy(value);
 }
 
 test "{de,}serialize single pointers" {
@@ -424,24 +466,24 @@ test "{de,}serialize single pointers" {
             var aw: Writer.Allocating = .init(gpa);
             defer aw.deinit();
 
-            try serializePointer(T, &aw.writer, value);
+            try serializeOnePointer(T, &aw.writer, value);
 
             {
                 var r: Reader = .fixed(aw.written());
-                const found = try deserializePointer(T, &r, gpa);
-                defer gpa.destroy(found);
+                const found = try deserializeOnePointer(T, &r, gpa);
+                defer freeOnePointer(T, gpa, found);
                 try std.testing.expectEqual(value.*, found.*);
             }
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T, &r, gpa);
-                defer gpa.destroy(found);
+                defer freeAny(T, gpa, found);
                 try std.testing.expectEqual(value.*, found.*);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -465,33 +507,23 @@ test "{de,}serialize single pointers" {
 }
 
 pub fn serializeSlice(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (info) {
-        .pointer => |ptr| switch (ptr.size) {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
             .many,
             .slice,
-            => {},
+            => info,
             .c => cannotBeSerialized(T),
             .one => @compileError(@typeName(T) ++ " is not a type of slice, prefer serializePointer"),
         },
         else => @compileError(@typeName(T) ++ " is not a slice"),
-    }
-    const ptr_info = info.pointer;
+    };
 
-    const Slice = @Pointer(.slice, .{
-        .@"const" = info.pointer.is_const,
-        .@"volatile" = info.pointer.is_volatile,
-        .@"allowzero" = info.pointer.is_allowzero,
-        .@"addrspace" = info.pointer.address_space,
-        .@"align" = info.pointer.alignment,
-    }, ptr_info.child, ptr_info.sentinel());
-
-    const slice: Slice = switch (ptr_info.size) {
-        .many => if (ptr_info.sentinel()) |sentinel| blk: {
-            if (!ptr_info.is_volatile and
-                ptr_info.alignment == @alignOf(ptr_info.child))
+    const slice = switch (info.size) {
+        .many => if (info.sentinel()) |sentinel| blk: {
+            if (!info.is_volatile and
+                info.alignment >= @alignOf(info.child))
             {
-                const len = mem.indexOfSentinel(ptr_info.child, sentinel, value);
+                const len = mem.indexOfSentinel(info.child, sentinel, value);
                 break :blk value[0..len :sentinel];
             }
 
@@ -507,59 +539,95 @@ pub fn serializeSlice(comptime T: type, w: *Writer, value: T) SerializationError
 
     try serializeInt(usize, w, slice.len);
 
-    if (ptr_info.child == u8 and
-        ptr_info.alignment == @alignOf(u8) and
-        !ptr_info.is_volatile)
+    if (info.child == u8 and
+        info.alignment >= @alignOf(u8) and
+        !info.is_volatile)
     {
         return try w.writeAll(slice);
     }
 
-    for (slice) |*inner| {
-        try serializeAny(ptr_info.child, w, inner);
+    for (slice) |inner| {
+        try serializeAny(info.child, w, inner);
     }
 }
 
 pub fn deserializeSlice(comptime T: type, r: *Reader, gpa: Allocator) DeserializationAllocError!T {
-    const info = @typeInfo(T);
-    switch (info) {
-        .pointer => |ptr| switch (ptr.size) {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
             .many,
             .slice,
-            => {},
+            => info,
             .c => cannotBeSerialized(T),
-            else => @compileError(@typeName(T) ++ " is not a slice, prefer serializePointer"),
+            else => @compileError(@typeName(T) ++ " is not a slice, prefer deserializePointer"),
         },
         else => @compileError(@typeName(T) ++ " is not a slice"),
-    }
-    const ptr_info = info.pointer;
+    };
 
     const len = try deserializeInt(usize, r);
 
     const slice = try gpa.allocWithOptions(
-        ptr_info.child,
+        info.child,
         len,
-        .fromByteUnits(ptr_info.alignment),
-        ptr_info.sentinel(),
+        .fromByteUnits(info.alignment),
+        info.sentinel(),
     );
     errdefer gpa.free(slice);
 
-    if (ptr_info.child == u8 and
-        ptr_info.alignment == @alignOf(u8) and
-        !ptr_info.is_volatile)
+    if (info.child == u8 and
+        info.alignment >= @alignOf(u8) and
+        !info.is_volatile)
     {
         try r.readSliceAll(slice);
         return slice;
     }
 
     for (slice) |*inner| {
-        inner.* = try deserializeAnyAlloc(ptr_info.child, r, gpa);
+        inner.* = try deserializeAnyAlloc(info.child, r, gpa);
     }
 
-    return switch (ptr_info.size) {
+    return switch (info.size) {
         .many => slice.ptr,
         .slice => slice,
         else => comptime unreachable,
     };
+}
+
+pub fn freeSlice(comptime T: type, gpa: Allocator, value: T) void {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
+            .many,
+            .slice,
+            => info,
+            .c => cannotBeSerialized(T),
+            else => @compileError(@typeName(T) ++ " is not a slice, prefer freePointer"),
+        },
+        else => @compileError(@typeName(T) ++ " is not a slice"),
+    };
+
+    const slice = switch (info.size) {
+        .many => if (info.sentinel()) |sentinel| blk: {
+            if (!info.is_volatile and
+                info.alignment >= @alignOf(info.child))
+            {
+                const len = mem.indexOfSentinel(info.child, sentinel, value);
+                break :blk value[0..len :sentinel];
+            }
+
+            var i: usize = 0;
+            while (value[i] != sentinel) {
+                i += 1;
+            }
+            break :blk value[0..i :sentinel];
+        } else @compileError("Cannot infer length of " ++ @typeName(T)),
+        .slice => value,
+        else => comptime unreachable,
+    };
+
+    for (slice) |inner| {
+        freeAny(info.child, gpa, inner);
+    }
+
+    gpa.free(slice);
 }
 
 test "{de,}serialize slices" {
@@ -583,19 +651,19 @@ test "{de,}serialize slices" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeSlice(T, &r, gpa);
-                defer gpa.free(found[0..len]);
+                defer freeSlice(T, gpa, found);
                 try std.testing.expectEqualSlices(Child, value[0..len], found[0..len]);
             }
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T, &r, gpa);
-                defer gpa.free(found[0..len]);
+                defer freeAny(T, gpa, found);
                 try std.testing.expectEqualSlices(Child, value[0..len], found[0..len]);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -637,19 +705,18 @@ test "{de,}serialize slices" {
     try tst([*:69]align(64) const u8, byte_slice.ptr);
 }
 
-pub fn serializeArray(comptime T: type, w: *Writer, value: *const T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (info) {
-        .array => {},
+pub fn serializeArray(comptime T: type, w: *Writer, value: T) SerializationError!void {
+    const info = switch (@typeInfo(T)) {
+        .array => |i| i,
         else => @compileError(@typeName(T) ++ " is not an array"),
+    };
+
+    if (info.child == u8) {
+        return try w.writeAll(&value);
     }
 
-    if (info.array.child == u8) {
-        return try w.writeAll(value);
-    }
-
-    for (value) |*inner| {
-        try serializeAny(info.array.child, w, inner);
+    for (value) |inner| {
+        try serializeAny(info.child, w, inner);
     }
 }
 
@@ -667,23 +734,33 @@ fn deserializeArrayAny(
     r: *Reader,
     gpa: alloc.Gpa(),
 ) alloc.Error()!T {
-    const info = @typeInfo(T);
-    switch (info) {
-        .array => {},
+    const info = switch (@typeInfo(T)) {
+        .array => |i| i,
         else => @compileError(@typeName(T) ++ " is not an array"),
-    }
+    };
 
     var res: T = undefined;
 
-    if (info.array.child == u8) {
+    if (info.child == u8) {
         try r.readSliceAll(&res);
         return res;
     }
 
     for (&res) |*inner| {
-        inner.* = try alloc.deser(info.array.child, r, gpa);
+        inner.* = try alloc.deser(info.child, r, gpa);
     }
     return res;
+}
+
+pub fn freeArray(comptime T: type, gpa: Allocator, value: T) void {
+    const info = switch (@typeInfo(T)) {
+        .array => |i| i,
+        else => @compileError(@typeName(T) ++ " is not an array"),
+    };
+
+    for (value) |inner| {
+        freeAny(info.child, gpa, inner);
+    }
 }
 
 test "{de,}serialize array" {
@@ -694,11 +771,12 @@ test "{de,}serialize array" {
             var aw: Writer.Allocating = .init(gpa);
             defer aw.deinit();
 
-            try serializeArray(T, &aw.writer, &value);
+            try serializeArray(T, &aw.writer, value);
 
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeArray(T, &r);
+                defer freeArray(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
             {
@@ -714,7 +792,7 @@ test "{de,}serialize array" {
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -726,7 +804,7 @@ test "{de,}serialize array" {
     try tst([12]u64, u64_arr);
 }
 
-pub fn serializeStruct(comptime T: type, w: *Writer, value: *const T) SerializationError!void {
+pub fn serializeStruct(comptime T: type, w: *Writer, value: T) SerializationError!void {
     switch (@typeInfo(T)) {
         .@"struct" => {},
         else => @compileError(@typeName(T) ++ " is not a struct"),
@@ -734,7 +812,7 @@ pub fn serializeStruct(comptime T: type, w: *Writer, value: *const T) Serializat
 
     inline for (comptime sortStructFields(T)) |field| {
         const F = @FieldType(T, field.name);
-        try serializeAny(F, w, &@field(value.*, field.name));
+        try serializeAny(F, w, @field(value, field.name));
     }
 }
 
@@ -765,6 +843,17 @@ pub fn deserializeStructAny(
     return res;
 }
 
+pub fn freeStruct(comptime T: type, gpa: Allocator, value: T) void {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |i| i,
+        else => @compileError(@typeName(T) ++ " is not a struct"),
+    };
+
+    inline for (info.fields) |field| {
+        freeAny(field.type, gpa, @field(value, field.name));
+    }
+}
+
 test "{de,}serialize struct" {
     const eql = struct {
         pub fn eql(a: anytype, b: anytype) !void {
@@ -781,11 +870,12 @@ test "{de,}serialize struct" {
             var aw: Writer.Allocating = .init(gpa);
             defer aw.deinit();
 
-            try serializeStruct(T1, &aw.writer, &value);
+            try serializeStruct(T1, &aw.writer, value);
 
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeStruct(T2, &r);
+                defer freeStruct(T2, gpa, found);
                 try eql(value, found);
             }
             {
@@ -796,12 +886,13 @@ test "{de,}serialize struct" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T2, &r, .failing);
+                defer freeAny(T2, gpa, found);
                 try eql(value, found);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T1, &aw2.writer, &value);
+            try serializeAny(T1, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -837,15 +928,14 @@ test "{de,}serialize struct" {
 }
 
 pub fn serializeOptional(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (info) {
-        .optional => {},
+    const info = switch (@typeInfo(T)) {
+        .optional => |i| i,
         else => @compileError(@typeName(T) ++ " is not an optional"),
-    }
+    };
 
-    if (value) |*inner| {
+    if (value) |inner| {
         try serializeBool(w, true);
-        try serializeAny(info.optional.child, w, inner);
+        try serializeAny(info.child, w, inner);
     } else {
         try serializeBool(w, false);
     }
@@ -865,17 +955,27 @@ pub fn deserializeOptionalAny(
     r: *Reader,
     gpa: alloc.Gpa(),
 ) alloc.Error()!T {
-    const info = @typeInfo(T);
-    switch (info) {
-        .optional => {},
+    const info = switch (@typeInfo(T)) {
+        .optional => |i| i,
         else => @compileError(@typeName(T) ++ " is not an optional"),
-    }
+    };
 
     const has_value = try deserializeBool(r);
 
     if (!has_value) return null;
 
-    return try alloc.deser(info.optional.child, r, gpa);
+    return try alloc.deser(info.child, r, gpa);
+}
+
+pub fn freeOptional(comptime T: type, gpa: Allocator, value: T) void {
+    const info = switch (@typeInfo(T)) {
+        .optional => |i| i,
+        else => @compileError(@typeName(T) ++ " is not an optional"),
+    };
+
+    if (value) |inner| {
+        freeAny(info.child, gpa, inner);
+    }
 }
 
 test "{de,}serialize optional" {
@@ -891,6 +991,7 @@ test "{de,}serialize optional" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeOptional(T, &r);
+                defer freeOptional(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
             {
@@ -901,12 +1002,13 @@ test "{de,}serialize optional" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, gpa, value);
                 try std.testing.expectEqual(value, found);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -916,24 +1018,22 @@ test "{de,}serialize optional" {
 }
 
 pub fn serializeEnum(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    const info = @typeInfo(T);
-    switch (@typeInfo(T)) {
-        .@"enum" => {},
+    const info = switch (@typeInfo(T)) {
+        .@"enum" => |i| i,
         else => @compileError(@typeName(T) ++ " is not an enum"),
-    }
+    };
 
-    const Tag = info.@"enum".tag_type;
+    const Tag = info.tag_type;
     try serializeInt(Tag, w, @intFromEnum(value));
 }
 
 pub fn deserializeEnum(comptime T: type, r: *Reader) DeserializationError!T {
-    const info = @typeInfo(T);
-    switch (@typeInfo(T)) {
-        .@"enum" => {},
+    const info = switch (@typeInfo(T)) {
+        .@"enum" => |i| i,
         else => @compileError(@typeName(T) ++ " is not an enum"),
-    }
+    };
 
-    const Tag = info.@"enum".tag_type;
+    const Tag = info.tag_type;
     const int = try deserializeInt(Tag, r);
     return std.enums.fromInt(T, int) orelse error.Corrupt;
 }
@@ -961,12 +1061,13 @@ test "{de,}serialize enum" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -977,18 +1078,18 @@ test "{de,}serialize enum" {
 }
 
 pub fn serializeUnion(comptime T: type, w: *Writer, value: T) SerializationError!void {
-    switch (@typeInfo(T)) {
+    const info = switch (@typeInfo(T)) {
         .@"union" => |info| switch (info.layout) {
             .@"extern", .@"packed" => cannotBeSerialized(T),
-            .auto => {},
+            .auto => info,
         },
         else => @compileError(@typeName(T) ++ " is not a union"),
-    }
+    };
 
-    const Tag = std.meta.Tag(T);
+    const Tag = info.tag_type orelse cannotBeSerialized(T);
 
     switch (value) {
-        inline else => |*pl, t| {
+        inline else => |pl, t| {
             const name = @tagName(t);
             const F = @FieldType(T, name);
 
@@ -1012,6 +1113,27 @@ inline fn deserializeUnionAny(
     r: *Reader,
     gpa: alloc.Gpa(),
 ) alloc.Error()!T {
+    const info = switch (@typeInfo(T)) {
+        .@"union" => |info| switch (info.layout) {
+            .@"extern", .@"packed" => cannotBeSerialized(T),
+            .auto => info,
+        },
+        else => @compileError(@typeName(T) ++ " is not a union"),
+    };
+
+    const Tag = info.tag_type orelse cannotBeSerialized(T);
+
+    const tag = try deserializeEnum(Tag, r);
+    switch (tag) {
+        inline else => |t| {
+            const name = @tagName(t);
+            const F = @FieldType(T, name);
+            return @unionInit(T, name, try alloc.deser(F, r, gpa));
+        },
+    }
+}
+
+pub fn freeUnion(comptime T: type, gpa: Allocator, value: T) void {
     switch (@typeInfo(T)) {
         .@"union" => |info| switch (info.layout) {
             .@"extern", .@"packed" => cannotBeSerialized(T),
@@ -1020,14 +1142,11 @@ inline fn deserializeUnionAny(
         else => @compileError(@typeName(T) ++ " is not a union"),
     }
 
-    const Tag = std.meta.Tag(T);
-
-    const tag = try deserializeEnum(Tag, r);
-    switch (tag) {
-        inline else => |t| {
+    switch (value) {
+        inline else => |pl, t| {
             const name = @tagName(t);
             const F = @FieldType(T, name);
-            return @unionInit(T, name, try alloc.deser(F, r, gpa));
+            freeAny(F, gpa, pl);
         },
     }
 }
@@ -1045,6 +1164,7 @@ test "{de,}serialize union" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeUnion(T, &r);
+                defer freeUnion(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
             {
@@ -1055,12 +1175,13 @@ test "{de,}serialize union" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
@@ -1070,16 +1191,15 @@ test "{de,}serialize union" {
     try tst(union(enum) { foo: u8, bar, baz: u32 }, .{ .baz = 12123456 });
 }
 
-pub fn serializeVector(comptime T: type, w: *Writer, value: *const T) SerializationError!void {
-    switch (@typeInfo(T)) {
-        .vector => {},
+pub fn serializeVector(comptime T: type, w: *Writer, value: T) SerializationError!void {
+    const info = switch (@typeInfo(T)) {
+        .vector => |i| i,
         else => @compileError(@typeName(T) ++ " is not a vector"),
-    }
-    const info = @typeInfo(T).vector;
+    };
 
     const Array = [info.len]info.child;
 
-    inline for (&@as(Array, @bitCast(value.*))) |*inner| {
+    for (&@as(Array, @bitCast(value))) |inner| {
         try serializeAny(info.child, w, inner);
     }
 }
@@ -1093,21 +1213,34 @@ pub fn deserializeVectorAlloc(comptime T: type, r: *Reader, gpa: Allocator) Dese
 }
 
 fn deserializeVectorAny(comptime T: type, comptime alloc: Alloc, r: *Reader, gpa: alloc.Gpa()) alloc.Error()!T {
-    switch (@typeInfo(T)) {
-        .vector => {},
+    const info = switch (@typeInfo(T)) {
+        .vector => |i| i,
         else => @compileError(@typeName(T) ++ " is not a vector"),
-    }
-    const info = @typeInfo(T).vector;
+    };
 
     const Array = [info.len]info.child;
     var res: Array = undefined;
 
-    inline for (&res) |*inner| {
+    for (&res) |*inner| {
         inner.* = try alloc.deser(info.child, r, gpa);
     }
 
     return @bitCast(res);
 }
+
+pub fn freeVector(comptime T: type, gpa: Allocator, value: T) void {
+    const info = switch (@typeInfo(T)) {
+        .vector => |i| i,
+        else => @compileError(@typeName(T) ++ " is not a vector"),
+    };
+
+    const Array = [info.len]info.child;
+
+    for (&@as(Array, @bitCast(value))) |inner| {
+        freeAny(info.child, gpa, inner);
+    }
+}
+
 test "{de,}serialize vector" {
     const tst = struct {
         pub fn tst(comptime T: type, value: T) !void {
@@ -1116,11 +1249,12 @@ test "{de,}serialize vector" {
             var aw: Writer.Allocating = .init(gpa);
             defer aw.deinit();
 
-            try serializeVector(T, &aw.writer, &value);
+            try serializeVector(T, &aw.writer, value);
 
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeVector(T, &r);
+                defer freeVector(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
             {
@@ -1131,12 +1265,13 @@ test "{de,}serialize vector" {
             {
                 var r: Reader = .fixed(aw.written());
                 const found = try deserializeAnyAlloc(T, &r, .failing);
+                defer freeAny(T, gpa, found);
                 try std.testing.expectEqual(value, found);
             }
 
             var aw2: Writer.Allocating = .init(gpa);
             defer aw2.deinit();
-            try serializeAny(T, &aw2.writer, &value);
+            try serializeAny(T, &aw2.writer, value);
             try std.testing.expectEqualSlices(u8, aw.written(), aw2.written());
         }
     }.tst;
